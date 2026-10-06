@@ -676,6 +676,30 @@ only an explicit company skill policy restriction does. Core safety and company
 boundary checks still apply, and `agents:create` remains required when a command
 also creates agents.
 
+### Optional SkillSpector inspection
+
+When [NVIDIA SkillSpector](https://github.com/NVIDIA/skillspector) is installed on
+the Paperclip server, `skills import`, `skills install`, and `skills scan-projects`
+run a static SkillSpector scan (`--no-llm`) on each new skill before it is saved.
+The server uses `SKILLSPECTOR_BIN` when set, otherwise the first `skillspector` on
+`PATH`. Without SkillSpector, installs behave exactly as before.
+
+- The install is held unless SkillSpector rates the skill `SAFE`. A `CAUTION` or
+  `DO_NOT_INSTALL` rating, any `HIGH` or `CRITICAL` finding, or a scan that fails to
+  finish holds it. In static mode SkillSpector rates most real attacks `CAUTION`.
+- The same check also applies Paperclip's built-in audit rules for remote
+  fetch-and-execute and secret exfiltration, which catch patterns such as
+  `base64 -d | sh` and `python3 -c` that SkillSpector's static mode misses.
+- A held response has `held: true` and the `inspections`; held skills are not added.
+- A board user can rerun the command with `--accept-inspection` to install anyway.
+  Agent API keys cannot accept a held install. Holds and overrides are written to
+  the activity log (`company.skill_inspection_held`, `company.skill_inspection_accepted`).
+- The scanner runs with a minimal environment and a 60 second timeout
+  (`SKILLSPECTOR_TIMEOUT_MS` overrides it). Its supply-chain rule may send
+  dependency names to OSV.
+- URL and skills.sh imports are scanned from the downloaded `SKILL.md`; GitHub,
+  local-path, catalog, and project-workspace imports are scanned with all files.
+
 ### Catalog (app-shipped skills)
 
 The Paperclip app ships a curated catalog under `@paperclipai/skills-catalog`.
@@ -686,7 +710,7 @@ skill to the company library.
 npx paperclipai skills browse [--kind bundled|optional] [--category <slug>] [--query <text>]
 npx paperclipai skills search "<text>" [--kind bundled|optional] [--category <slug>]
 npx paperclipai skills inspect <catalog-id-or-key-or-slug>
-npx paperclipai skills install <catalog-id-or-key-or-slug> [--as <slug>] [--force] --company-id <company-id>
+npx paperclipai skills install <catalog-id-or-key-or-slug> [--as <slug>] [--force] [--accept-inspection] --company-id <company-id>
 ```
 
 Catalog semantics:

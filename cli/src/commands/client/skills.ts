@@ -10,6 +10,8 @@ import {
   type CompanySkillDetail,
   type CompanySkillFileDetail,
   type CompanySkillImportResult,
+  type CompanySkillInspection,
+  type CompanySkillInspectionHold,
   type CompanySkillInstallCatalogResult,
   type CompanySkillListItem,
   type CompanySkillProjectScanResult,
@@ -32,6 +34,13 @@ interface SkillsOptions extends BaseClientOptions {
   companyId?: string;
 }
 
+interface InspectionOptions {
+  acceptInspection?: boolean;
+}
+
+const ACCEPT_INSPECTION_FLAG = "--accept-inspection";
+const ACCEPT_INSPECTION_HELP = "Install even if NVIDIA SkillSpector holds the skill (board users only)";
+
 interface SkillFileOptions extends SkillsOptions {
   path?: string;
 }
@@ -43,7 +52,7 @@ interface SkillCreateOptions extends SkillsOptions {
   bodyFile?: string;
 }
 
-interface SkillScanProjectsOptions extends SkillsOptions {
+interface SkillScanProjectsOptions extends SkillsOptions, InspectionOptions {
   projectId?: string[];
   workspaceId?: string[];
 }
@@ -54,7 +63,7 @@ interface CatalogBrowseOptions extends BaseClientOptions {
   query?: string;
 }
 
-interface CatalogInstallOptions extends SkillsOptions {
+interface CatalogInstallOptions extends SkillsOptions, InspectionOptions {
   as?: string;
   force?: boolean;
 }
@@ -163,22 +172,29 @@ export function registerSkillsCommands(program: Command): void {
       .argument("<catalogRef>", "Catalog skill ID, key, or unique slug")
       .option("--as <slug>", "Company skill slug override")
       .option("--force", "Replace a same-key catalog-managed skill when the server allows it", false)
+      .option(ACCEPT_INSPECTION_FLAG, ACCEPT_INSPECTION_HELP, false)
       .action(async (catalogRef: string, opts: CatalogInstallOptions) => {
         try {
           const ctx = resolveCommandContext(opts, { requireCompany: true });
-          const result = await ctx.api.post<CompanySkillInstallCatalogResult>(
+          const result = await ctx.api.post<CompanySkillInstallCatalogResult | CompanySkillInspectionHold>(
             `/api/companies/${ctx.companyId}/skills/install-catalog`,
             {
               catalogSkillId: catalogRef,
               slug: opts.as,
               force: opts.force || undefined,
+              acceptInspection: opts.acceptInspection || undefined,
             },
           );
           if (ctx.json) {
             printOutput(result, { json: true });
             return;
           }
+          if (result?.held === true) {
+            printInspectionHold(result.inspections);
+            return;
+          }
           printCatalogInstallResult(result);
+          printInspectionFindings(result?.inspections);
         } catch (err) {
           handleCommandError(err);
         }
@@ -260,17 +276,23 @@ export function registerSkillsCommands(program: Command): void {
       .command("import")
       .description("Import company skills from a local path, GitHub, skills.sh, or URL source")
       .argument("<source>", "Skill source")
-      .action(async (source: string, opts: SkillsOptions) => {
+      .option(ACCEPT_INSPECTION_FLAG, ACCEPT_INSPECTION_HELP, false)
+      .action(async (source: string, opts: SkillsOptions & InspectionOptions) => {
         try {
           const ctx = resolveCommandContext(opts, { requireCompany: true });
           const result = await ctx.api.post<CompanySkillImportResult>(
             `/api/companies/${ctx.companyId}/skills/import`,
-            { source },
+            { source, acceptInspection: opts.acceptInspection || undefined },
           );
           if (ctx.json) {
             printOutput(result, { json: true });
             return;
           }
+          if (result?.held) {
+            printInspectionHold(result.inspections);
+            return;
+          }
+          printInspectionFindings(result?.inspections);
           console.log(
             `Imported ${result?.imported.length ?? 0} skill(s); warnings=${result?.warnings.length ?? 0}`,
           );
@@ -324,6 +346,7 @@ export function registerSkillsCommands(program: Command): void {
       .description("Scan project workspaces for skills")
       .option("--project-id <id>", "Project ID to scan; may be repeated", collectOptionValue, [] as string[])
       .option("--workspace-id <id>", "Workspace ID to scan; may be repeated", collectOptionValue, [] as string[])
+      .option(ACCEPT_INSPECTION_FLAG, ACCEPT_INSPECTION_HELP, false)
       .action(async (opts: SkillScanProjectsOptions) => {
         try {
           const ctx = resolveCommandContext(opts, { requireCompany: true });
@@ -332,6 +355,7 @@ export function registerSkillsCommands(program: Command): void {
             {
               projectIds: emptyToUndefined(opts.projectId),
               workspaceIds: emptyToUndefined(opts.workspaceId),
+              acceptInspection: opts.acceptInspection || undefined,
             },
           );
           if (ctx.json) {
@@ -341,6 +365,8 @@ export function registerSkillsCommands(program: Command): void {
           console.log(
             `Scanned projects=${result?.scannedProjects ?? 0} workspaces=${result?.scannedWorkspaces ?? 0} discovered=${result?.discovered ?? 0} imported=${result?.imported.length ?? 0} updated=${result?.updated.length ?? 0} skipped=${result?.skipped.length ?? 0} conflicts=${result?.conflicts.length ?? 0} warnings=${result?.warnings.length ?? 0}`,
           );
+          if (result?.held) printInspectionHold(result.inspections);
+          else printInspectionFindings(result?.inspections);
         } catch (err) {
           handleCommandError(err);
         }
@@ -806,6 +832,26 @@ function printCatalogSkillDetail(skill: CatalogSkill): void {
     sizeBytes: file.sizeBytes,
     sha256: file.sha256,
   })));
+}
+
+function printInspectionFindings(inspections: CompanySkillInspection[] | undefined): void {
+  for (const inspection of inspections ?? []) {
+    if (inspection.status !== "findings" && inspection.status !== "error") continue;
+    const score = inspection.score === null ? "" : ` score=${inspection.score}`;
+    const verdict = inspection.recommendation ? ` recommendation=${inspection.recommendation}` : "";
+    console.log(`inspection skill=${inspection.skillName} status=${inspection.status}${score}${verdict}${inspection.blocking ? " held" : ""}`);
+    if (inspection.message) console.log(`  ${inspection.message}`);
+    for (const finding of inspection.findings) {
+      const location = finding.path ? ` ${finding.path}${finding.line ? `:${finding.line}` : ""}` : "";
+      console.log(`  ${finding.severity} ${finding.ruleId} ${finding.title}${location}`);
+    }
+  }
+}
+
+function printInspectionHold(inspections: CompanySkillInspection[] | undefined): void {
+  console.log("NVIDIA SkillSpector held this install. Held skills were not added.");
+  printInspectionFindings(inspections);
+  console.log(`Review the findings, then rerun with ${ACCEPT_INSPECTION_FLAG} to install anyway.`);
 }
 
 function printCatalogInstallResult(result: CompanySkillInstallCatalogResult | null): void {

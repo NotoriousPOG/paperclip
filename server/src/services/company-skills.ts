@@ -1,4 +1,11 @@
 import { logger } from "../middleware/logger.js";
+import {
+  failedInspection,
+  mapInspections,
+  resolveSkillSpectorBin,
+  scanSkillDirectory,
+  withPaperclipAuditFindings,
+} from "./skill-inspector.js";
 import { removeRuntimeSkillCache, resolveRuntimeSkillCache, runtimeSkillCacheSpec } from "./runtime-skill-cache.js";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -54,6 +61,8 @@ import type {
   CompanySkillForkReassignment,
   CompanySkillForkSummary,
   CompanySkillImportResult,
+  CompanySkillInspection,
+  CompanySkillInspectionHold,
   CompanySkillInstallCatalogRequest,
   CompanySkillInstallCatalogResult,
   CompanySkillListQuery,
@@ -2523,6 +2532,30 @@ function pushFinding(
   findings.push({ code, severity, message, path: filePath });
 }
 
+/** Built-in audit codes that also hold an install when SkillSpector inspection is on. */
+const INSPECTION_AUDIT_CODES = new Set(["remote_fetch_exec", "secret_exfiltration"]);
+
+/**
+ * SkillSpector plus the deterministic security rules of the built-in audit. The built-in
+ * rules catch command patterns that SkillSpector's static mode misses, such as
+ * `base64 -d | sh` and `python3 -c`, on import paths that are not audited before install.
+ */
+export async function inspectSkillDirectory(skillId: string, skillName: string, skillDir: string) {
+  const [inspection, audit] = await Promise.all([
+    scanSkillDirectory(skillId, skillName, skillDir),
+    collectSkillFileBytes(skillDir).then(({ files }) => auditInstalledSkillBytes({
+      sourceType: "local_path",
+      sourceLocator: skillDir,
+      fileInventory: files.map((file) => ({ path: file.path, kind: file.kind })),
+      metadata: null,
+    } as unknown as CompanySkill)),
+  ]);
+  return withPaperclipAuditFindings(
+    inspection,
+    audit.findings.filter((finding) => INSPECTION_AUDIT_CODES.has(finding.code)),
+  );
+}
+
 async function auditInstalledSkillBytes(skill: CompanySkill): Promise<CompanySkillAuditResult> {
   const skillDir = normalizeSkillDirectory(skill);
   const scannedAt = new Date().toISOString();
@@ -2581,8 +2614,8 @@ async function auditInstalledSkillBytes(skill: CompanySkill): Promise<CompanySki
     }
   }
 
-  const remoteExecPattern = /\b(?:curl|wget)\b[\s\S]{0,160}\|\s*(?:sh|bash)|\b(?:bash|sh)\s+-c\b|\beval\b|\bpython\s+-c\b|\bnode\s+-e\b/i;
-  const secretExfilPattern = /\b(?:cat|printenv|env|grep)\b[\s\S]{0,160}(?:\.aws\/credentials|\.ssh\/|\.npmrc|id_rsa|OPENAI_API_KEY|ANTHROPIC_API_KEY|API_KEY|TOKEN|SECRET)[\s\S]{0,160}\b(?:curl|wget|nc|netcat|scp)\b/i;
+  const remoteExecPattern = /\b(?:curl|wget)\b[\s\S]{0,160}\|\s*(?:sh|bash)|\b(?:bash|sh)\s+-c\b|\beval\b|\bpython[23]?(?:\.\d+)?\s+-c\b|\bnode\s+-e\b|\b(?:base64\s+(?:-d|-D|--decode)|xxd\s+-r)\b[\s\S]{0,80}\|\s*(?:sh|bash|zsh)\b|\b(?:sh|bash|zsh|source)\s+<\(\s*(?:curl|wget)\b/i;
+  const secretExfilPattern = /\b(?:cat|printenv|env|grep)\b[\s\S]{0,160}(?:\.aws\/credentials|\.ssh\/|\.npmrc|id_rsa|OPENAI_API_KEY|ANTHROPIC_API_KEY|API_KEY|TOKEN|SECRET)[\s\S]{0,160}\b(?:curl|wget|nc|netcat|scp)\b|\b(?:env|printenv)\b\s*\|[\s\S]{0,160}\b(?:curl|wget|nc|netcat|scp)\b/i;
   const networkPattern = /\b(?:curl|wget|fetch|httpie|nc|netcat|scp|ssh)\b|https?:\/\//i;
   const secretReferencePattern = /\b(?:process\.env|printenv|\$[A-Z][A-Z0-9_]{2,}|API_KEY|TOKEN|SECRET|PASSWORD|\.env)\b/i;
 
@@ -5098,7 +5131,7 @@ export function companySkillService(db: Db) {
 
   async function scanProjectWorkspaces(
     companyId: string,
-    input: CompanySkillProjectScanRequest = {},
+    input: CompanySkillProjectScanRequest & { review?: boolean } = {},
   ): Promise<CompanySkillProjectScanResult> {
     await ensureSkillInventoryCurrent(companyId);
     const mode = input.mode ?? "import";
@@ -5113,6 +5146,17 @@ export function companySkillService(db: Db) {
     const warnings: string[] = [];
     const imported: CompanySkill[] = [];
     const updated: CompanySkill[] = [];
+    const inspections: CompanySkillInspection[] = [];
+    let held = false;
+    async function blockUnacceptedSkill(skill: ImportedSkill): Promise<boolean> {
+      if (!input.review) return false;
+      const inspection = await inspectImportedSkill(skill);
+      if (!inspection) return false;
+      inspections.push(inspection);
+      if (!inspection.blocking || input.acceptInspection) return false;
+      held = true;
+      return true;
+    }
     const availableSkills = await listFull(companyId);
     const acceptedSkills = [...availableSkills];
     const acceptedByKey = new Map(acceptedSkills.map((skill) => [skill.key, skill]));
@@ -5444,6 +5488,17 @@ export function companySkillService(db: Db) {
           ...(!selected ? { reason: "Not selected for import." } : {}),
         });
         if (mode === "preview" || !selected) continue;
+        if (await blockUnacceptedSkill(nextSkill)) {
+          skipped.push({
+            projectId: target.projectId,
+            projectName: target.projectName,
+            workspaceId: target.workspaceId,
+            workspaceName: target.workspaceName,
+            path: directory.skillDir,
+            reason: "Held by SkillSpector inspection until a board user accepts the findings.",
+          });
+          continue;
+        }
         const persisted = (await upsertImportedSkills(companyId, [nextSkill]))[0];
         if (!persisted) continue;
         imported.push(persisted);
@@ -5483,6 +5538,7 @@ export function companySkillService(db: Db) {
       conflicts,
       candidates,
       warnings,
+      ...(input.review ? { held, inspections } : {}),
     };
   }
 
@@ -5705,8 +5761,8 @@ export function companySkillService(db: Db) {
 
   async function installFromCatalog(
     companyId: string,
-    input: CompanySkillInstallCatalogRequest,
-  ): Promise<CompanySkillInstallCatalogResult> {
+    input: CompanySkillInstallCatalogRequest & { review?: boolean },
+  ): Promise<CompanySkillInstallCatalogResult | CompanySkillInspectionHold> {
     await ensureSkillInventoryCurrent(companyId);
     const catalogSkill = getCatalogSkillOrThrow(input.catalogSkillId);
     assertCatalogSkillInstallable(catalogSkill);
@@ -5759,6 +5815,13 @@ export function companySkillService(db: Db) {
           });
         }
       }
+    }
+
+    // Inspect before materializing: the managed catalog directories are replaced in place,
+    // so a held reinstall must not touch the files of the currently installed skill.
+    const inspections = input.review ? await inspectCatalogSkill(catalogSkill, slug) : [];
+    if (inspections.some((inspection) => inspection.blocking) && input.acceptInspection !== true) {
+      return { held: true, inspections, warnings: [] };
     }
 
     let materializedDir: string | null = null;
@@ -5854,6 +5917,7 @@ export function companySkillService(db: Db) {
       skill: audited,
       catalogSkill,
       warnings: postAudit.findings.map((finding) => finding.message),
+      ...(input.review ? { held: false, inspections } : {}),
     };
   }
 
@@ -6327,7 +6391,11 @@ export function companySkillService(db: Db) {
     return out;
   }
 
-  async function importFromSource(companyId: string, source: string): Promise<CompanySkillImportResult> {
+  async function importFromSource(
+    companyId: string,
+    source: string,
+    options?: { review?: boolean; acceptInspection?: boolean },
+  ): Promise<CompanySkillImportResult> {
     await ensureSkillInventoryCurrent(companyId);
     const parsed = parseSkillImportSourceInput(source);
     const local = !/^https?:\/\//i.test(parsed.resolvedSource);
@@ -6366,8 +6434,12 @@ export function companySkillService(db: Db) {
         skill.key = deriveCanonicalSkillKey(companyId, skill);
       }
     }
+    const inspections = options?.review ? await mapInspections(filteredSkills, inspectImportedSkill) : [];
+    if (options?.review && !options.acceptInspection && inspections.some((inspection) => inspection.blocking)) {
+      return { imported: [], warnings, held: true, inspections };
+    }
     const imported = await upsertImportedSkills(companyId, filteredSkills);
-    return { imported, warnings };
+    return options?.review ? { imported, warnings, held: false, inspections } : { imported, warnings };
   }
 
   async function listTestInputs(companyId: string, skillId: string): Promise<CompanySkillTestInput[]> {
@@ -7218,6 +7290,85 @@ export function companySkillService(db: Db) {
     return deleted;
   }
 
+  async function resolveInspectionDirectory(companyId: string, skill: CompanySkill): Promise<string | null> {
+    const metadata = skill.metadata ?? {};
+    const sourceId = metadata.skillSourceId;
+    const snapshotHash = metadata.snapshotHash;
+    if (
+      typeof sourceId === "string"
+      && sourceId
+      && typeof snapshotHash === "string"
+      && snapshotHash
+      && skill.currentVersionId
+    ) {
+      const version = await getVersion(companyId, skill.id, skill.currentVersionId);
+      if (!version) return null;
+      return materializeVersionSnapshot(companyId, skill, version);
+    }
+    return resolveExistingSkillDirectory(normalizeSkillDirectory(skill));
+  }
+
+  /**
+   * Inspect a skill before it is persisted. Local packages are scanned in place; URL
+   * imports only carry SKILL.md at this point, so that is what gets scanned.
+   */
+  async function inspectImportedSkill(skill: ImportedSkill): Promise<CompanySkillInspection | null> {
+    if (!resolveSkillSpectorBin()) return null;
+    let stagingDir: string | null = null;
+    try {
+      const localDir = skill.sourceType === "local_path"
+        ? await resolveExistingSkillDirectory(normalizeSourceLocatorDirectory(skill.sourceLocator))
+        : null;
+      if (localDir) return await inspectSkillDirectory(skill.slug, skill.name, localDir);
+      stagingDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-skill-inspect-"));
+      await fs.writeFile(path.join(stagingDir, "SKILL.md"), skill.markdown, { mode: 0o600 });
+      return await inspectSkillDirectory(skill.slug, skill.name, stagingDir);
+    } catch (error) {
+      logger.warn({ err: error, skillSlug: skill.slug }, "skill inspection failed before install");
+      return failedInspection(skill.slug, skill.name, "SkillSpector could not finish the scan.");
+    } finally {
+      if (stagingDir) await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  async function inspectCatalogSkill(catalogSkill: CatalogSkill, slug: string): Promise<CompanySkillInspection[]> {
+    if (!resolveSkillSpectorBin()) return [];
+    const stagingDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-catalog-inspect-"));
+    try {
+      for (const entry of catalogSkill.files) {
+        const targetPath = path.resolve(stagingDir, entry.path);
+        if (!targetPath.startsWith(`${stagingDir}${path.sep}`)) {
+          throw unprocessable(`Catalog file path is invalid: ${entry.path}`);
+        }
+        await fs.mkdir(path.dirname(targetPath), { recursive: true });
+        await copyCatalogSkillFile(catalogSkill.id, entry.path, targetPath);
+      }
+      return [await inspectSkillDirectory(slug, catalogSkill.name, stagingDir)];
+    } catch (error) {
+      logger.warn({ err: error, catalogSkillId: catalogSkill.id }, "catalog skill inspection failed before install");
+      return [failedInspection(slug, catalogSkill.name, "SkillSpector could not finish the scan.")];
+    } finally {
+      await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  /** Inspect skills that are already in the library, such as workspace skills refreshed in place. */
+  async function inspectAddedSkills(
+    companyId: string,
+    skills: CompanySkill[],
+  ): Promise<CompanySkillInspection[]> {
+    if (!resolveSkillSpectorBin()) return [];
+    return mapInspections(skills, async (skill) => {
+      try {
+        const skillDir = await resolveInspectionDirectory(companyId, skill);
+        return skillDir ? await scanSkillDirectory(skill.id, skill.name, skillDir) : null;
+      } catch (error) {
+        logger.warn({ err: error, companyId, skillId: skill.id }, "skill inspection failed after install");
+        return failedInspection(skill.id, skill.name, "SkillSpector could not read this skill. The skill was still added.");
+      }
+    });
+  }
+
   return {
     list,
     listFull,
@@ -7277,6 +7428,7 @@ export function companySkillService(db: Db) {
     installFromCatalog,
     browseProjectWorkspace,
     scanProjectWorkspaces,
+    inspectAddedSkills,
     importPackageFiles,
     auditSkill,
     installUpdate,

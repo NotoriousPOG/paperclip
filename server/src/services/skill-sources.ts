@@ -2,12 +2,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { and, eq, isNull, lt, or, sql } from 'drizzle-orm';
 import { companySkillSources as sources, companySkillSourceEntries as entries, companySkills, type Db } from '@paperclipai/db';
-import type { CompanySkill, SkillSource, SkillSourceCreateRequest, SkillSourceDiscoveryRequest, SkillSourceSelectionRequest, SkillSourceRefreshResult, SkillSourcePreviewRequest } from '@paperclipai/shared';
+import type { CompanySkill, CompanySkillImportResult, SkillSource, SkillSourceCreateRequest, SkillSourceDiscoveryRequest, SkillSourceSelectionRequest, SkillSourceRefreshResult, SkillSourcePreviewRequest } from '@paperclipai/shared';
 import { normalizeAgentUrlKey } from '@paperclipai/shared';
 import { conflict, notFound, unprocessable } from '../errors.js';
 import { companySkillService, parseSkillImportSourceInput } from './company-skills.js';
 import { scanGitHubSkills, previewGitHubSkillFile, type GitHubRead, type ScannedSkillSource, type SkillScanOptions } from './github-skill-source.js';
 import { skillSnapshotHash } from './skill-snapshot.js';
+import { mapInspections, resolveSkillSpectorBin, scanSkillFiles } from './skill-inspector.js';
 
 type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
 type SourceRow = typeof sources.$inferSelect;
@@ -213,7 +214,7 @@ export function skillSourceService(db: Db) {
       return detail(companyId, id, tx);
     });
   }
-  async function importFromUrl(companyId: string, input: string, context: SkillSourceContext) {
+  async function importFromUrl(companyId: string, input: string, context: SkillSourceContext, review?: { acceptInspection: boolean }): Promise<CompanySkillImportResult> {
     const parsed = parseSkillImportSourceInput(input);
     const url = new URL(parsed.resolvedSource);
     const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
@@ -248,11 +249,19 @@ export function skillSourceService(db: Db) {
       (!parsed.requestedSkillSlug || normalizeAgentUrlKey(candidate.name) === parsed.requestedSkillSlug || candidate.path.split('/').at(-2) === parsed.requestedSkillSlug)
     ).map(candidate => candidate.path);
     if (!selectedPaths.length) throw unprocessable('No matching SKILL.md files were found in this repository.');
+    // Inspect the downloaded files before anything is persisted, so a held import leaves no source or skill behind.
+    const inspections = review && resolveSkillSpectorBin()
+      ? await mapInspections(scan.skills.filter(skill => selectedPaths.includes(skill.path) && !skill.error),
+        skill => scanSkillFiles(normalizeAgentUrlKey(skill.name) ?? skill.path, skill.name, skill.files))
+      : [];
+    if (review && !review.acceptInspection && inspections.some(inspection => inspection.blocking)) {
+      return { imported: [], warnings: [], held: true, inspections };
+    }
     const result = existing
       ? await refresh(companyId, existing.id, context, { revision: existing.revision, selectedPaths: [...new Set([...existing.entries.filter(entry => entry.selection === 'selected').map(entry => entry.path), ...selectedPaths])], excludedFolders: existing.excludedFolders }, scan)
       : await create(companyId, { repositoryUrl: scan.repositoryUrl, trackingRef: scan.trackingRef, commitSha: scan.commitSha, connectionId, selectedPaths }, context, scan);
     const imported = await Promise.all(result.source.entries.filter(entry => selectedPaths.includes(entry.path) && entry.skillId && !entry.error).map(entry => skills.getById(companyId, entry.skillId!)));
-    return { imported: imported.filter((skill): skill is CompanySkill => Boolean(skill)), warnings: result.warnings };
+    return { imported: imported.filter((skill): skill is CompanySkill => Boolean(skill)), warnings: result.warnings, ...(review ? { held: false, inspections } : {}) };
   }
   return { list, detail, sourceForSkill, discover, preview, create, refresh, disconnect, importFromUrl };
 }

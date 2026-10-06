@@ -26,6 +26,8 @@ import type {
   CompanySkillVersion,
 } from "@paperclipai/shared";
 import { companySkillsApi } from "../api/companySkills";
+import { SkillInspectionDialog } from "./skills/SkillInspectionDialog";
+import { useSkillInspectionHold } from "./skills/useSkillInspectionHold";
 import { foldersApi } from "../api/folders";
 import { agentsApi } from "../api/agents";
 import { useCompany } from "../context/CompanyContext";
@@ -4071,6 +4073,7 @@ export function CompanySkills() {
   const [discoverySort, setDiscoverySort] = useState<DiscoverySort>("agents");
   const [createError, setCreateError] = useState<string | null>(null);
   const [importDialogOpen, setImportDialogOpen] = useState(false);
+  const inspectionHold = useSkillInspectionHold();
   const [importFromProjectOpen, setImportFromProjectOpen] = useState(false);
   const [folderDialogOpen, setFolderDialogOpen] = useState(false);
   const [folderDialogTarget, setFolderDialogTarget] = useState<FolderListItem | null>(null);
@@ -4404,8 +4407,12 @@ export function CompanySkills() {
   }
 
   const importSkill = useMutation({
-    mutationFn: (importSource: string) => companySkillsApi.importFromSource(selectedCompanyId!, importSource),
-    onSuccess: async (result) => {
+    mutationFn: (input: { source: string; acceptInspection?: boolean }) =>
+      companySkillsApi.importFromSource(selectedCompanyId!, input.source, { acceptInspection: input.acceptInspection }),
+    onSuccess: async (result, input) => {
+      setImportDialogOpen(false);
+      const accept = () => importSkill.mutate({ source: input.source, acceptInspection: true });
+      if (inspectionHold.review(result, accept, input.acceptInspection === true)) return;
       await queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.list(selectedCompanyId!) });
       if (result.imported[0]) navigate(routeForSkill(result.imported[0]));
       pushToast({
@@ -4424,16 +4431,32 @@ export function CompanySkills() {
   });
 
   const scanProjects = useMutation({
-    mutationFn: (projectId?: string) => companySkillsApi.scanProjects(
+    mutationFn: (input: { projectId?: string; acceptInspection?: boolean } = {}) => companySkillsApi.scanProjects(
       selectedCompanyId!,
-      projectId ? { projectIds: [projectId] } : {},
+      {
+        ...(input.projectId ? { projectIds: [input.projectId] } : {}),
+        ...(input.acceptInspection ? { acceptInspection: true } : {}),
+      },
     ),
-    onMutate: (projectId) => {
+    onMutate: (input) => {
       setScanStatusMessage(
-        projectId ? "Refreshing project skills..." : "Scanning project workspaces for skills...",
+        input?.projectId ? "Refreshing project skills..." : "Scanning project workspaces for skills...",
       );
     },
-    onSuccess: async (result) => {
+    onSuccess: async (result, input) => {
+      const accept = () => scanProjects.mutate({ projectId: input?.projectId, acceptInspection: true });
+      if (inspectionHold.review(result, accept, input?.acceptInspection === true)) {
+        setScanStatusMessage("Waiting for an install decision.");
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.list(selectedCompanyId!) }),
+          queryClient.invalidateQueries({ queryKey: queryKeys.folders.list(selectedCompanyId!, "skill") }),
+        ]);
+        if (result.imported.length > 0 || result.updated.length > 0) {
+          const summary = formatProjectScanSummary(result);
+          pushToast({ tone: "success", title: "Project skill scan complete", body: summary });
+        }
+        return;
+      }
       setScanStatusMessage("Refreshing skills list...");
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.list(selectedCompanyId!) }),
@@ -4707,13 +4730,19 @@ export function CompanySkills() {
     return counts;
   }, [installedSkills]);
   const installCatalog = useMutation({
-    mutationFn: (payload: { catalogSkillId: string; slug: string | null; force: boolean; agentIds: string[] }) =>
+    mutationFn: (payload: { catalogSkillId: string; slug: string | null; force: boolean; agentIds: string[]; acceptInspection?: boolean }) =>
       companySkillsApi.installCatalog(selectedCompanyId!, {
         catalogSkillId: payload.catalogSkillId,
         slug: payload.slug,
         force: payload.force,
+        acceptInspection: payload.acceptInspection,
       }),
     onSuccess: async (result, payload) => {
+      const accept = () => installCatalog.mutate({ ...payload, acceptInspection: true });
+      if (inspectionHold.review(result, accept, payload.acceptInspection === true)) {
+        setInstallDialogState((current) => ({ ...current, open: false, error: null }));
+        return;
+      }
       // Enable the skill for the agents chosen in the install dialog before any
       // invalidation, so the refetched skill detail already reflects the
       // attachments. Mode "add" appends to each agent's desired set without
@@ -5177,7 +5206,7 @@ export function CompanySkills() {
       setEmptySourceHelpOpen(true);
       return;
     }
-    importSkill.mutate(trimmedSource);
+    importSkill.mutate({ source: trimmedSource });
   }
 
   // Opening a card stays inside the new store and always lands on a regular full
@@ -5329,6 +5358,10 @@ export function CompanySkills() {
             agentIds,
           });
         }}
+      />
+
+      <SkillInspectionDialog
+        {...inspectionHold.dialogProps(importSkill.isPending || installCatalog.isPending || scanProjects.isPending)}
       />
 
       <Dialog open={importDialogOpen} onOpenChange={setImportDialogOpen}>
@@ -5503,7 +5536,7 @@ export function CompanySkills() {
           onImport={() => setImportDialogOpen(true)}
           onImportFromProject={() => setImportFromProjectOpen(true)}
           onBrowseDiscover={() => streamlinedUiEnabled ? setDiscoveryTab("discover") : setLegacyDiscoveryTab("catalog")}
-          onScan={(projectId) => scanProjects.mutate(projectId)}
+          onScan={(projectId) => scanProjects.mutate({ projectId })}
           scanPending={scanProjects.isPending}
           scanStatus={scanStatusMessage}
           folderResult={showInstalledFolders ? railSkillFolderResult : null}

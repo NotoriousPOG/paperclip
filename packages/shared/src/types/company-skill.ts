@@ -317,6 +317,44 @@ export interface CompanySkillAuditResult {
   scanVersion: string;
 }
 
+/**
+ * Optional pre-install scan by NVIDIA SkillSpector. "unavailable" means the
+ * scanner is not installed on this server and never blocks an install.
+ */
+export type CompanySkillInspectionStatus = "clean" | "findings" | "unavailable" | "error";
+
+export type CompanySkillInspectionRecommendation = "SAFE" | "CAUTION" | "DO_NOT_INSTALL";
+
+export interface CompanySkillInspectionFinding {
+  ruleId: string;
+  severity: string;
+  title: string;
+  detail: string;
+  path: string | null;
+  line: number | null;
+}
+
+export interface CompanySkillInspection {
+  /** Skill slug before install, or company skill id after install. */
+  skillId: string;
+  skillName: string;
+  status: CompanySkillInspectionStatus;
+  recommendation: CompanySkillInspectionRecommendation | null;
+  /** True when the install is held until a board user accepts the findings. */
+  blocking: boolean;
+  score: number | null;
+  severity: string | null;
+  findings: CompanySkillInspectionFinding[];
+  message: string | null;
+}
+
+/** Returned instead of an install result when an inspection blocks the install. */
+export interface CompanySkillInspectionHold {
+  held: true;
+  inspections: CompanySkillInspection[];
+  warnings: string[];
+}
+
 export interface CompanySkillInstallUpdateRequest {
   force?: boolean;
 }
@@ -327,17 +365,22 @@ export interface CompanySkillResetRequest {
 
 export interface CompanySkillImportRequest {
   source: string;
+  acceptInspection?: boolean;
 }
 
 export interface CompanySkillImportResult {
   imported: CompanySkill[];
   warnings: string[];
+  /** True when nothing was imported because an inspection blocked the install. */
+  held?: boolean;
+  inspections?: CompanySkillInspection[];
 }
 
 export interface CompanySkillProjectScanRequest {
   projectIds?: string[];
   workspaceIds?: string[];
   mode?: "import" | "preview";
+  acceptInspection?: boolean;
   selection?: Array<{
     workspaceId: string;
     path: string;
@@ -418,6 +461,9 @@ export interface CompanySkillProjectScanResult {
   conflicts: CompanySkillProjectScanConflict[];
   candidates: CompanySkillProjectScanCandidate[];
   warnings: string[];
+  /** True when at least one selected skill was not imported because an inspection blocked it. */
+  held?: boolean;
+  inspections?: CompanySkillInspection[];
 }
 
 export interface CompanySkillCreateRequest {
@@ -703,6 +749,7 @@ export interface CompanySkillInstallCatalogRequest {
   catalogSkillId: string;
   slug?: string | null;
   force?: boolean;
+  acceptInspection?: boolean;
 }
 
 export interface CompanySkillInstallCatalogResult {
@@ -710,4 +757,6 @@ export interface CompanySkillInstallCatalogResult {
   skill: CompanySkill;
   catalogSkill: CatalogSkill;
   warnings: string[];
+  held?: false;
+  inspections?: CompanySkillInspection[];
 }
