@@ -37,6 +37,15 @@ vi.mock("../services/company-transfer-runs.js", () => ({
   companyTransferRunService: mockTransferRunService,
 }));
 
+// This file mounts company routes with an empty database. Export now asks the
+// scope ceiling before it runs. With no scope rows that ceiling allows the
+// request. The stub keeps this cloud-floor test from querying a database.
+vi.mock("../services/resource-scope-authorization.js", () => ({
+  resourceScopeAuthorizationService: () => ({
+    decide: async () => ({ allowed: true, restricted: false }),
+  }),
+}));
+
 const TRANSFER_ID = "6e0a4f6e-6f7d-4a37-9a83-0b8f2f9f2b11";
 
 /**
