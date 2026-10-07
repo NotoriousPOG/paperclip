@@ -2121,6 +2121,7 @@ export function ConfigurationTab({
 
       {content === "permissions" ? <div>
         <h3 className="text-sm font-medium mb-3">Permissions</h3>
+        <p className="mb-3 text-sm"><Link className="underline" to="/company/settings/permissions">Edit explicit grants and assignment scopes</Link></p>
         <div className="border border-border rounded-lg p-4 space-y-4">
           <div className="flex items-center justify-between gap-4 text-sm">
             <div className="space-y-1">

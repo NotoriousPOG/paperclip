@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  accessGroups,
+  resourceAccessScopes,
   activityLog,
   agentWakeupRequests,
   toolActionDeliveries,
@@ -202,6 +204,35 @@ describeEmbeddedPostgres("tool gateway service", () => {
 
   afterAll(async () => {
     await tempDb?.cleanup();
+  });
+
+  it("rejects a previously issued session when its agent becomes private", async () => {
+    const { company, agent, run } = await createRunFixture(db);
+    const gateway = createTestToolGatewayService(db);
+    const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+    await db.insert(companyMemberships).values({ companyId: company.id, principalType: "agent", principalId: agent.id, status: "active", membershipRole: "member", accessMode: "groups" });
+    try {
+      await expect(gateway.executeTool({ sessionToken: session.token, tool: "mcp-remote-fixture:update_note", parameters: {} })).rejects.toMatchObject({ reasonCode: "private_team_denied" });
+    } finally {
+      await db.delete(companyMemberships).where(and(eq(companyMemberships.companyId, company.id), eq(companyMemberships.principalId, agent.id)));
+    }
+  });
+
+  it("revokes a company-mode tool session when the company gains restricted resources", async () => {
+    const { company, agent, run } = await createRunFixture(db);
+    const gateway = createTestToolGatewayService(db);
+    const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+    const [group] = await db.insert(accessGroups).values({ companyId: company.id, name: "Restricted investigation" }).returning();
+    await db.insert(resourceAccessScopes).values({ companyId: company.id, groupId: group.id, agentId: agent.id });
+    try {
+      await expect(gateway.executeTool({ sessionToken: session.token, tool: "mcp-remote-fixture:update_note", parameters: {} })).rejects.toMatchObject({ reasonCode: "private_team_denied" });
+      // A second company's tool session can otherwise reach the same host.
+      const other = await createRunFixture(db);
+      await expect(gateway.createSession({ companyId: other.company.id, agentId: other.agent.id, runId: other.run.id })).rejects.toMatchObject({ reasonCode: "private_team_denied" });
+    } finally {
+      await db.delete(resourceAccessScopes).where(eq(resourceAccessScopes.companyId, company.id));
+      await db.delete(accessGroups).where(eq(accessGroups.id, group.id));
+    }
   });
 
   it("gates write tools with an action request and executes only stored reviewed arguments once", async () => {

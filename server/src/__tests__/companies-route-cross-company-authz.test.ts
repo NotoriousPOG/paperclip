@@ -2,6 +2,9 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const mockResourceScope = vi.hoisted(() => vi.fn(async () => ({ allowed: true, restricted: false })));
+vi.mock("../services/resource-scope-authorization.js", () => ({ resourceScopeAuthorizationService: () => ({ decide: mockResourceScope }) }));
+
 const companyAId = "11111111-1111-4111-8111-111111111111";
 const companyBId = "22222222-2222-4222-8222-222222222222";
 const ceoAgentId = "ceo-agent-a";
@@ -217,6 +220,7 @@ function boardActor(input: {
 
 describe("company route cross-company authorization", () => {
   beforeEach(() => {
+    mockResourceScope.mockReset().mockResolvedValue({ allowed: true, restricted: false });
     vi.resetModules();
     vi.doUnmock("../routes/authz.js");
     vi.doUnmock("../middleware/index.js");

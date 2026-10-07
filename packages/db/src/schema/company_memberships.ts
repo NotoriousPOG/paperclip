@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, uniqueIndex, index } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, unique, uniqueIndex, index } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 
 export const companyMemberships = pgTable(
@@ -10,10 +10,12 @@ export const companyMemberships = pgTable(
     principalId: text("principal_id").notNull(),
     status: text("status").notNull().default("active"),
     membershipRole: text("membership_role"),
+    accessMode: text("access_mode").notNull().default("company"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    companyIdUnique: unique("company_memberships_company_id_uq").on(table.companyId, table.id),
     companyPrincipalUniqueIdx: uniqueIndex("company_memberships_company_principal_unique_idx").on(
       table.companyId,
       table.principalType,

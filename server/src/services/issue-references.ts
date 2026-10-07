@@ -1,4 +1,5 @@
 import { and, asc, eq, inArray, isNull } from "drizzle-orm";
+import { issueReadPredicate, type ResourceReadAuthorization } from "./authorized-resource-query.js";
 import type { Db } from "@paperclipai/db";
 import {
   documentAnnotationComments,
@@ -342,7 +343,11 @@ export function issueReferenceService(db: Db) {
     }
   }
 
-  async function listIssueReferenceSummary(issueId: string, dbOrTx: any = db): Promise<IssueRelatedWorkSummary> {
+  async function listIssueReferenceSummary(
+    issueId: string,
+    dbOrTx: any = db,
+    authorization?: ResourceReadAuthorization,
+  ): Promise<IssueRelatedWorkSummary> {
       const issue = await issueById(issueId, dbOrTx);
       if (!issue) throw notFound("Issue not found");
 
@@ -366,6 +371,7 @@ export function issueReferenceService(db: Db) {
           .where(and(
             eq(issueReferenceMentions.companyId, issue.companyId),
             eq(issueReferenceMentions.sourceIssueId, issueId),
+            issueReadPredicate(issue.companyId, authorization, issues.id, issues.companyId),
           )),
         dbOrTx
           .select({
@@ -386,6 +392,7 @@ export function issueReferenceService(db: Db) {
           .where(and(
             eq(issueReferenceMentions.companyId, issue.companyId),
             eq(issueReferenceMentions.targetIssueId, issueId),
+            issueReadPredicate(issue.companyId, authorization, issues.id, issues.companyId),
           )),
       ]);
 

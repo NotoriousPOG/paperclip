@@ -1,4 +1,5 @@
 import express from "express";
+import { unscopedQueryDb } from "./helpers/unscoped-query-db.js";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -220,9 +221,7 @@ async function createApp(transaction: (callback: (tx: Record<string, never>) => 
     };
     next();
   });
-  app.use("/api", issueRoutes({
-    transaction,
-  } as any, {} as any));
+  app.use("/api", issueRoutes(unscopedQueryDb({ transaction }) as any, {} as any));
   app.use(errorHandler);
   return app;
 }

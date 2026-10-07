@@ -1865,7 +1865,7 @@ describe("environment routes", () => {
     ]);
     expect(mockSecretService.describeSecretRefs).toHaveBeenCalledWith([
       { secretId, configPath: "apiKey", versionSelector: "latest" },
-    ]);
+    ], { actorType: "user", actorId: "admin-1", consumerType: "system", consumerId: "env-sandbox", responsibleUserId: undefined });
   });
 
   it("denies secret-ref descriptors to agents without instance environment access", async () => {

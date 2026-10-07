@@ -28,7 +28,28 @@ import {
   type CompanyArtifactsResponse,
 } from "@paperclipai/shared";
 import { badRequest, notFound } from "../errors.js";
+import { authorizedResourcePredicate, type AuthorizedResourceQuery } from "./authorized-resource-query.js";
 import type { StorageService } from "../storage/types.js";
+
+export type CompanyResourceAuthorization = Omit<AuthorizedResourceQuery, "companyId" | "resource">;
+
+/** Preserve every linked issue's scope before artifact content or metadata is selected. */
+export function artifactAuthorizationConditions(companyId: string, authorization?: CompanyResourceAuthorization) {
+  const scope = (type: "issue" | "agent", id: SQL, company: SQL) => authorization
+    ? authorizedResourcePredicate({ ...authorization, companyId, resource: { type, id, companyId: company } }) : sql`true`;
+  const creator = (id: SQL) => sql`(${id} is null or ${scope("agent", id, sql`${companyId}::uuid`)})`;
+  return {
+    issue: scope("issue", sql`${issues.id}`, sql`${issues.companyId}`),
+    document: authorization ? sql`(${creator(sql`${documents.createdByAgentId}`)} and ${creator(sql`${documents.updatedByAgentId}`)}
+      and not exists (select 1 from issue_documents provenance where provenance.document_id = ${documents.id}
+        and not ${scope("issue", sql`provenance.issue_id`, sql`provenance.company_id`)}))` : sql`true`,
+    attachment: authorization ? sql`(${creator(sql`${assets.createdByAgentId}`)} and not exists
+      (select 1 from issue_attachments provenance where provenance.asset_id = ${assets.id}
+        and not ${scope("issue", sql`provenance.issue_id`, sql`provenance.company_id`)}))` : sql`true`,
+    // Free-form work product URLs and metadata lack a trustworthy provenance relation.
+    workProduct: authorization ? sql`false` : sql`true`,
+  };
+}
 
 const TEXT_PREVIEW_BYTES = 4096;
 const PREVIEW_TEXT_MAX_LENGTH = 280;
@@ -195,7 +216,7 @@ function pageByCursor<T extends { id: string; updatedAt: string }>(
   return { page, nextCursor };
 }
 
-async function loadIssueGroupingRows(db: Db, companyId: string, seedIssueIds: Iterable<string>) {
+async function loadIssueGroupingRows(db: Db, companyId: string, seedIssueIds: Iterable<string>, authorization?: CompanyResourceAuthorization) {
   const rowsById = new Map<string, IssueGroupingRow>();
   let pending = [...new Set(seedIssueIds)];
 
@@ -209,7 +230,7 @@ async function loadIssueGroupingRows(db: Db, companyId: string, seedIssueIds: It
         updatedAt: issues.updatedAt,
       })
       .from(issues)
-      .where(and(eq(issues.companyId, companyId), inArray(issues.id, pending)));
+      .where(and(eq(issues.companyId, companyId), inArray(issues.id, pending), artifactAuthorizationConditions(companyId, authorization).issue));
 
     const nextPending = new Set<string>();
     for (const row of rows) {
@@ -321,8 +342,9 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
     list: async (
       companyId: string,
       rawQuery: Partial<CompanyArtifactsQuery> = {},
-      options: { issueConditions?: SQL[]; userId?: string } = {},
+      options: { issueConditions?: SQL[]; userId?: string; authorization?: CompanyResourceAuthorization } = {},
     ): Promise<CompanyArtifactsResponse> => {
+      const admission = artifactAuthorizationConditions(companyId, options.authorization);
       const query = companyArtifactsQuerySchema.parse(rawQuery);
       const cursor = decodeCursor(query.cursor);
       const groupBy = query.groupBy === "none" ? null : query.groupBy;
@@ -341,6 +363,7 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
       const sourceFetchLimit = groupBy ? GROUPED_ARTIFACT_FETCH_LIMIT : fetchLimit;
       const q = query.q ? `%${escapeLikePattern(query.q)}%` : null;
       const issueConditions: SQL[] = [
+        admission.issue,
         isNull(issues.hiddenAt),
         isNull(issues.harnessKind),
         ...(options.issueConditions ?? []),
@@ -354,6 +377,7 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
         const updatedAgent = alias(agents, "document_updated_agent");
         const documentArtifactId = sql<string>`concat('document:', ${documents.id})`;
         const documentConditions: SQL[] = [
+          admission.document,
           eq(issueDocuments.companyId, companyId),
           eq(documents.companyId, companyId),
           ...issueConditions,
@@ -479,6 +503,7 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
         const workProductArtifactId = sql<string>`concat('work_product:', ${issueWorkProducts.id})`;
         const workProductContentType = sql<string>`coalesce(${issueWorkProducts.metadata}->>'contentType', '')`;
         const workProductBaseConditions: SQL[] = [
+          admission.workProduct,
           eq(issueWorkProducts.companyId, companyId),
           eq(issueWorkProducts.type, "artifact"),
           eq(issueWorkProducts.provider, "paperclip"),
@@ -619,6 +644,7 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
         const attachmentAgent = alias(agents, "attachment_agent");
         const attachmentArtifactId = sql<string>`concat('attachment:', ${issueAttachments.id})`;
         const attachmentConditions: SQL[] = [
+          admission.attachment,
           eq(issueAttachments.companyId, companyId),
           isNull(issueAttachments.issueCommentId),
           isNotNull(assets.createdByAgentId),
@@ -742,7 +768,7 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
 
       const issueSeedIds = new Set(artifacts.map((artifact) => artifact.issue.id));
       if (query.groupIssueId) issueSeedIds.add(query.groupIssueId);
-      const issueRows = await loadIssueGroupingRows(db, companyId, issueSeedIds);
+      const issueRows = await loadIssueGroupingRows(db, companyId, issueSeedIds, options.authorization);
       const groups = buildArtifactGroups({
         artifacts: sorted,
         companyPrefix: company.issuePrefix,

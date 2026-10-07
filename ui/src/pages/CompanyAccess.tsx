@@ -5,7 +5,7 @@ import {
   hidesCompanyPage,
   type Agent,
 } from "@paperclipai/shared";
-import { Shield, ShieldCheck, Trash2, UserPlus } from "lucide-react";
+import { ShieldCheck, Trash2, UserPlus } from "lucide-react";
 import { accessApi, type CompanyMember } from "@/api/access";
 import { agentsApi } from "@/api/agents";
 import { ApiError } from "@/api/client";
@@ -28,7 +28,6 @@ import { useToast } from "@/context/ToastContext";
 import { Link, Navigate, useSearchParams } from "@/lib/router";
 import { queryKeys } from "@/lib/queryKeys";
 import { cloudStackInviteUrl } from "@/lib/cloudLinks";
-import { usePluginSlots } from "@/plugins/slots";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
 import { PageTabBar } from "@/components/PageTabBar";
 import { useHiddenSettings } from "@/hooks/useHiddenSettings";
@@ -596,63 +595,7 @@ export function CompanyAccess() {
 }
 
 export function CompanyAccessLegacyRoute() {
-  const { selectedCompanyId } = useCompany();
-  const { setBreadcrumbs } = useBreadcrumbs();
-  const { slots, isLoading, errorMessage } = usePluginSlots({
-    slotTypes: ["companySettingsPage"],
-    companyId: selectedCompanyId,
-    enabled: !!selectedCompanyId,
-  });
-
-  useEffect(() => {
-    setBreadcrumbs([
-      { label: "Settings", href: "/company/settings" },
-      { label: "Access" },
-    ]);
-  }, [setBreadcrumbs]);
-
-  const permissionsSlot = slots.find((slot) => slot.routePath === "permissions");
-  if (permissionsSlot) {
-    return <Navigate to="/company/settings/permissions" replace />;
-  }
-
-  if (isLoading) {
-    return <div className="text-sm text-muted-foreground">Checking for advanced permission extensions...</div>;
-  }
-
-  return (
-    <div className="max-w-2xl space-y-5">
-      <div className="space-y-3">
-        <div className="flex items-center gap-2">
-          <Shield className="h-5 w-5 text-muted-foreground" />
-          <h1 className="text-lg font-semibold">Advanced Permissions</h1>
-        </div>
-        <p className="text-sm text-muted-foreground">
-          Advanced access, scoped assignment, and explicit grant controls are provided by installed organization settings extensions.
-        </p>
-      </div>
-
-      <div className="space-y-4 rounded-xl border border-border px-5 py-5">
-        <div className="space-y-2">
-          <h2 className="text-sm font-semibold">Advanced permissions unavailable</h2>
-          <p className="text-sm text-muted-foreground">
-            Core Paperclip keeps enforcing organization boundaries and any existing restrictive policy data, but editing advanced permissions requires an installed extension.
-          </p>
-          {errorMessage ? (
-            <p className="text-sm text-destructive">Plugin extensions unavailable: {errorMessage}</p>
-          ) : null}
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <Button asChild>
-            <Link to="/company/settings/members">Open Members</Link>
-          </Button>
-          <Button asChild variant="outline">
-            <Link to="/company/settings/members?tab=invites">Open Invites</Link>
-          </Button>
-        </div>
-      </div>
-    </div>
-  );
+  return <Navigate to="/company/settings/permissions" replace />;
 }
 
 function memberDisplayName(member: CompanyMember | null) {

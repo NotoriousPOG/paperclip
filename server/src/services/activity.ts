@@ -18,6 +18,7 @@ import {
 } from "@paperclipai/db";
 import { hasWorkspaceRestoreFailure, safeWorkspaceRestorePath, ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY } from "@paperclipai/shared";
 import { logger } from "../middleware/logger.js";
+import { issueReadPredicate, resourceReadPredicate, type ResourceReadAuthorization } from "./authorized-resource-query.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
 import { classifyRunLiveness } from "./run-liveness.js";
 
@@ -27,6 +28,8 @@ export interface ActivityFilters {
   entityType?: string;
   entityId?: string;
   limit?: number;
+  /** Present only when the company has a resource scope. Unknown entity types stay hidden. */
+  authorization?: ResourceReadAuthorization;
 }
 
 const DEFAULT_ACTIVITY_LIMIT = 100;
@@ -351,6 +354,15 @@ export function activityService(db: Db) {
         conditions.push(eq(activityLog.entityId, filters.entityId));
       }
 
+      const entityUuid = sql`case when ${activityLog.entityId} ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' then ${activityLog.entityId}::uuid else null end`;
+      const scopedEntity = (type: "project" | "agent" | "secret") => and(
+        eq(activityLog.entityType, type),
+        resourceReadPredicate(filters.companyId, filters.authorization, {
+          type,
+          id: entityUuid,
+          companyId: activityLog.companyId,
+        }),
+      );
       return db
         .select({ activityLog })
         .from(activityLog)
@@ -364,10 +376,21 @@ export function activityService(db: Db) {
         .where(
           and(
             ...conditions,
-            or(
-              sql`${activityLog.entityType} != 'issue'`,
-              visibleIssueCondition(),
-            ),
+            filters.authorization
+              ? or(
+                  and(
+                    eq(activityLog.entityType, "issue"),
+                    visibleIssueCondition(),
+                    issueReadPredicate(filters.companyId, filters.authorization, issues.id, issues.companyId),
+                  ),
+                  scopedEntity("project"),
+                  scopedEntity("agent"),
+                  scopedEntity("secret"),
+                )
+              : or(
+                  sql`${activityLog.entityType} != 'issue'`,
+                  visibleIssueCondition(),
+                ),
           ),
         )
         .orderBy(desc(activityLog.createdAt))

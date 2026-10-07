@@ -1,5 +1,8 @@
+import { restrictedSecretAccessService } from "../services/restricted-secret-access.js";
 import { Router, type Response } from "express";
-import type { Db } from "@paperclipai/db";
+import { and, eq } from "drizzle-orm";
+import { resourceAccessScopes, type Db } from "@paperclipai/db";
+import { resourceQueryContext } from "../services/resource-query-context.js";
 import {
   createSecretProviderConfigSchema,
   createSecretSchema,
@@ -115,6 +118,30 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
   const heartbeat = deps.heartbeat ?? heartbeatService(db);
   const runRedactions = createRunSecretRedactionRegistry(db);
   const defaultProvider = getConfiguredSecretProvider();
+  const restrictedSecrets = restrictedSecretAccessService(db);
+  async function secretVisible(req: Parameters<typeof assertBoard>[0], secret: { id: string; companyId: string }) {
+    const operation = req.method === "GET" || req.method === "HEAD" ? "read" : "write";
+    const scopeContext = await resourceQueryContext(db, secret.companyId, req.actor);
+    const memberAllowed = await restrictedSecrets.allowed(secret.companyId, secret.id, {
+      actorType: req.actor.type === "agent" ? "agent" : "user",
+      actorId: req.actor.type === "agent" ? req.actor.agentId : req.actor.userId,
+      responsibleUserId: req.actor.onBehalfOfUserId,
+    }, operation);
+    if (!scopeContext) return memberAllowed;
+    const [scope] = await db.select({ id: resourceAccessScopes.id }).from(resourceAccessScopes).where(and(
+      eq(resourceAccessScopes.companyId, secret.companyId), eq(resourceAccessScopes.secretId, secret.id),
+    ));
+    const companyRead = await access.decide({ actor: req.actor, action: "secrets:read", resource: { type: "company", companyId: secret.companyId } });
+    if (!scope) return companyRead.allowed;
+    if (operation === "write") return companyRead.allowed && memberAllowed;
+    return memberAllowed;
+  }
+  async function visibleSecrets(req: Parameters<typeof assertBoard>[0], companyId: string) {
+    const rows = await svc.list(companyId);
+    const visible = [];
+    for (const secret of rows) if (await secretVisible(req, secret)) visible.push(secret);
+    return visible;
+  }
 
   async function assertSecretCatalogReadAllowed(req: Parameters<typeof assertBoard>[0], companyId: string) {
     const decision = await access.decide({
@@ -123,6 +150,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
       resource: { type: "company", companyId },
     });
     if (decision.allowed) return;
+    if (await resourceQueryContext(db, companyId, req.actor)) return;
     throw forbidden(decision.explanation, authorizationDeniedDetails(decision));
   }
 
@@ -587,7 +615,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     await assertSecretCatalogReadAllowed(req, companyId);
-    const secrets = await svc.list(companyId);
+    const secrets = await visibleSecrets(req, companyId);
     res.json(secrets.map(({ id, name, key, status }) => ({ id, name, key, status })));
   });
 
@@ -595,7 +623,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
     assertBoard(req);
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    const secrets = await svc.list(companyId);
+    const secrets = await visibleSecrets(req, companyId);
     res.json(secrets);
   });
 
@@ -996,7 +1024,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
     const existing = await getAccessibleResource(
       req,
       res,
-      fetched && isCompanyScopedSecret(fetched) ? fetched : null,
+      fetched && isCompanyScopedSecret(fetched) && await secretVisible(req, fetched) ? fetched : null,
       "Secret not found",
     );
     if (!existing) return;
@@ -1036,7 +1064,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
     const existing = await getAccessibleResource(
       req,
       res,
-      fetched && isCompanyScopedSecret(fetched) ? fetched : null,
+      fetched && isCompanyScopedSecret(fetched) && await secretVisible(req, fetched) ? fetched : null,
       "Secret not found",
     );
     if (!existing) return;
@@ -1080,7 +1108,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
     const existing = await getAccessibleResource(
       req,
       res,
-      fetched && isCompanyScopedSecret(fetched) ? fetched : null,
+      fetched && isCompanyScopedSecret(fetched) && await secretVisible(req, fetched) ? fetched : null,
       "Secret not found",
     );
     if (!existing) return;
@@ -1095,7 +1123,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
     const existing = await getAccessibleResource(
       req,
       res,
-      fetched && isCompanyScopedSecret(fetched) ? fetched : null,
+      fetched && isCompanyScopedSecret(fetched) && await secretVisible(req, fetched) ? fetched : null,
       "Secret not found",
     );
     if (!existing) return;
@@ -1110,7 +1138,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
     const existing = await getAccessibleResource(
       req,
       res,
-      fetched && isCompanyScopedSecret(fetched) ? fetched : null,
+      fetched && isCompanyScopedSecret(fetched) && await secretVisible(req, fetched) ? fetched : null,
       "Secret not found",
     );
     if (!existing) return;

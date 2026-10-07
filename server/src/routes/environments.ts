@@ -1096,7 +1096,12 @@ export function environmentRoutes(
     // picker cannot list. Gated by the same instance-level access check as
     // environment editing.
     const refs = await collectEnvironmentSecretRefs({ db, environment });
-    res.json({ refs: await secrets.describeSecretRefs(refs) });
+    res.json({ refs: await secrets.describeSecretRefs(refs, {
+      consumerType: "system", consumerId: environment.id,
+      actorType: req.actor.type === "agent" ? "agent" : "user",
+      actorId: req.actor.type === "agent" ? req.actor.agentId : req.actor.userId,
+      responsibleUserId: req.actor.onBehalfOfUserId,
+    }) });
   });
 
   router.get("/environments/:id/leases", async (req, res) => {

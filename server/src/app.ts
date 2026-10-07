@@ -33,6 +33,10 @@ import {
 import type { InspectDatabaseBackupHealthOptions } from "./services/database-backup-health.js";
 import type { StorageService } from "./storage/types.js";
 import { httpLogger, errorHandler } from "./middleware/index.js";
+import { restrictedResourceBoundary } from "./middleware/restricted-resource-boundary.js";
+import { privateTeamBoundary } from "./middleware/private-team-boundary.js";
+import { accessGroupRoutes } from "./routes/access-groups.js";
+import { resourceScopeRoutes } from "./routes/resource-scopes.js";
 import { actorMiddleware } from "./middleware/auth.js";
 import { boardMutationGuard } from "./middleware/board-mutation-guard.js";
 import {
@@ -600,6 +604,9 @@ export async function createApp(
   // REPLACES whatever actor the request otherwise resolved to, and only on
   // the one endpoint it authorizes (see the middleware for the contract).
   app.use(cloudControlMiddleware());
+  app.use("/api", privateTeamBoundary(db));
+  app.use(["/llms", "/mcp"], privateTeamBoundary(db));
+  app.use(["/api", "/llms", "/mcp"], restrictedResourceBoundary(db));
   app.use("/api/auth", authRoutes(db));
   if (opts.betterAuthHandler) {
     app.all("/api/auth/{*authPath}", opts.betterAuthHandler);
@@ -675,6 +682,8 @@ export async function createApp(
   const agentAvatars = agentAvatarRoutes();
   api.use(agentAvatars.router);
   api.use(boardMutationGuard());
+  api.use(accessGroupRoutes(db));
+  api.use(resourceScopeRoutes(db));
   api.use("/health", health);
   api.use(openApiRoutes());
   api.use("/cloud", cloudRoutes());

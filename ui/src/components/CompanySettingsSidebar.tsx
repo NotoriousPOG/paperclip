@@ -120,8 +120,10 @@ export function CompanySettingsSidebar() {
               end
             />
           )}
+          {showPage("company.members") && <SidebarNavItem to="/company/settings/teams" label="Groups & access" icon={Users} end />}
+          {showPage("company.members") && <SidebarNavItem to="/company/settings/permissions" label="Permissions" icon={Shield} end />}
           {companySettingsPluginSlots
-            .filter((slot) => slot.routePath)
+            .filter((slot) => slot.routePath && !["permissions", "teams"].includes(slot.routePath))
             .map((slot) => (
               <SidebarNavItem
                 key={`${slot.pluginKey}:${slot.id}`}

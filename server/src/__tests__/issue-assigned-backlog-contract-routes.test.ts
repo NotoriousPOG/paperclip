@@ -1,4 +1,5 @@
 import express from "express";
+import { unscopedQueryDb } from "./helpers/unscoped-query-db.js";
 import request from "supertest";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -134,7 +135,7 @@ async function createApp() {
     };
     next();
   });
-  app.use("/api", issueRoutes({} as any, {} as any));
+  app.use("/api", issueRoutes(unscopedQueryDb() as any, {} as any));
   app.use(errorHandler);
   return app;
 }

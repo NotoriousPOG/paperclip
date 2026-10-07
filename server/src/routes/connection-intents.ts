@@ -1,3 +1,4 @@
+import { hasRestrictedResources, isPrivateTeamPrincipal } from "../services/private-team-access.js";
 import { connectionIntentDeliveryService } from "../services/connection-intent-delivery.js";
 import { Router, type Request } from "express";
 import type { Db } from "@paperclipai/db";
@@ -43,6 +44,16 @@ import { RUNTIME_CONNECTION_TOOL_DEFINITIONS } from "../services/connection-tool
 export function runtimeConnectionIntentRoutes(db: Db) {
   const router = Router();
   const service = connectionIntentService(db);
+  router.use(async (req, _res, next) => {
+    try {
+      const raw = typeof req.headers["x-paperclip-github-capability"] === "string" ? req.headers["x-paperclip-github-capability"] : bearer(req);
+      const claims = verifyRuntimeToolsToken(raw) ?? verifyRuntimeToolsToken(raw, "github_credentials");
+      if (claims && (await hasRestrictedResources(db) || await isPrivateTeamPrincipal(db, claims.company_id, "agent", claims.sub)
+        || await isPrivateTeamPrincipal(db, claims.company_id, "user", claims.responsible_user_id))) throw forbidden("Private team runtime access is not enabled");
+      next();
+    } catch (error) { next(error); }
+  });
+
 
   router.post("/runtime-tools/github/credentials", async (req, res) => {
     // This capability is never accepted as board/session authentication.

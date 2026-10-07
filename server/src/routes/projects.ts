@@ -46,6 +46,7 @@ import { appendWithCap } from "../adapters/utils.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { environmentService } from "../services/environments.js";
 import { secretService } from "../services/secrets.js";
+import { resourceQueryContext } from "../services/resource-query-context.js";
 
 const WORKSPACE_CONTROL_OUTPUT_MAX_CHARS = 256 * 1024;
 const SHARED_WORKSPACE_STOP_AND_RESTART_ACTIONS = new Set(["stop", "restart"]);
@@ -151,7 +152,9 @@ export function projectRoutes(db: Db) {
       resource: { type: "project", companyId: project.companyId, projectId: project.id },
     });
     if (decision.allowed) return true;
-    res.status(403).json({ error: "Project is outside this actor's authorization boundary" });
+    res.status(decision.reason === "deny_resource_policy" ? 404 : 403).json({
+      error: decision.reason === "deny_resource_policy" ? "Project not found" : "Project is outside this actor's authorization boundary",
+    });
     return false;
   }
 
@@ -212,6 +215,8 @@ export function projectRoutes(db: Db) {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     const includeArchived = req.query.includeArchived === "true";
+    const authorization = await resourceQueryContext(db, companyId, req.actor);
+    if (authorization) res.setHeader("Cache-Control", "no-store");
     if (req.query.view === "summary") {
       const page = projectDiscoverySchema.extend({ limit: z.coerce.number().int().min(1).max(50).default(50) }).parse({
         limit: req.query.limit, cursor: req.query.cursor,
@@ -222,7 +227,9 @@ export function projectRoutes(db: Db) {
       // Scan bounded projections; authorization runs before selecting the public
       // page/cursor so denied projects neither fill pages nor leak their IDs.
       while (visible.length <= page.limit) {
-        const batch = await svc.listSummaries(companyId, { limit: 51, cursor, includeArchived, candidateIds });
+        const batch = await svc.listSummaries(companyId, {
+          limit: 51, cursor, includeArchived, candidateIds, ...(authorization ? { authorization } : {}),
+        });
         const allowed = await filterProjectsForActor(req, batch.map(project => ({ ...project, companyId })));
         visible.push(...allowed.map(({ companyId: _companyId, ...project }) => project));
         if (batch.length < 51) break;
@@ -232,7 +239,7 @@ export function projectRoutes(db: Db) {
       res.json({ projects: selected, nextCursor: visible.length > page.limit ? selected.at(-1)!.id : null } satisfies ProjectDiscoveryPage);
       return;
     }
-    const result = await svc.list(companyId, { includeArchived });
+    const result = await svc.list(companyId, { includeArchived, ...(authorization ? { authorization } : {}) });
     res.json(await filterProjectsForActor(req, result));
   });
 

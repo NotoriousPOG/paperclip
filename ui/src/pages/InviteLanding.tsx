@@ -291,14 +291,14 @@ export function InviteLandingPage() {
     Boolean(invite?.companyId) &&
     !membershipListIsCurrent;
   const isCurrentMember =
-    Boolean(invite?.companyId) &&
+    inviteQuery.data?.inviteType !== "team_join" && Boolean(invite?.companyId) &&
     companyList.some((company) => company.id === invite?.companyId);
   const companyName = invite?.companyName?.trim() || null;
   const companyDisplayName = companyName || "this Paperclip company";
   const companyLogoUrl = invite?.companyLogoUrl?.trim() || null;
   const invitedByUserName = invite?.invitedByUserName?.trim() || null;
   const inviteMessage = invite?.inviteMessage?.trim() || null;
-  const requestedHumanRole = formatHumanRole(invite?.humanRole);
+  const requestedHumanRole = invite?.inviteType === "team_join" ? `${invite.teamName ?? "Restricted group"} - ${invite.teamRole ?? "viewer"}` : formatHumanRole(invite?.humanRole);
   const inviteJoinRequestStatus = invite?.joinRequestStatus ?? null;
   const inviteJoinRequestType = invite?.joinRequestType ?? null;
   const canCompleteAcceptedHumanInvite =

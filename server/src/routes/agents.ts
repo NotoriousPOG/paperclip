@@ -1157,7 +1157,9 @@ export function agentRoutes(
   async function assertAgentReadAllowed(req: Request, res: Response, agent: { id: string; companyId: string }) {
     const decision = await decideAgentRead(req, agent);
     if (decision.allowed) return true;
-    res.status(403).json({ error: "Agent is outside this actor's authorization boundary" });
+    res.status(decision.reason === "deny_resource_policy" ? 404 : 403).json({
+      error: decision.reason === "deny_resource_policy" ? "Agent not found" : "Agent is outside this actor's authorization boundary",
+    });
     return false;
   }
 

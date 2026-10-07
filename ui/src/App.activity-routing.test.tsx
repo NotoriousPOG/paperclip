@@ -305,3 +305,5 @@ describe("App Activity routing (PAP-16302)", () => {
     flushSync(() => root.unmount());
   });
 });
+
+vi.mock("./pages/PrivateTeamGate", () => ({ PrivateTeamGate: ({ children }: any) => children }));

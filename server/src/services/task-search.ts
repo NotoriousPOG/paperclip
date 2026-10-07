@@ -1,6 +1,8 @@
-import { sql, type SQL } from "drizzle-orm";
+import { sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import { COMPANY_SEARCH_MAX_QUERY_LENGTH, COMPANY_SEARCH_MAX_TOKENS } from "@paperclipai/shared";
 import { visibleIssueCondition } from "./issue-visibility.js";
+
+import { authorizedResourcePredicate, type AuthorizedResourceQuery } from "./authorized-resource-query.js";
 
 // Only grammatical filler is ignored, only in multi-term queries, and never
 // inside quotes. Keep negation and domain words (API, UI, PR, etc.) meaningful.
@@ -81,19 +83,24 @@ export function taskSearchScore(search: TaskSearch): SQL<number> {
  * Uses existing pg_trgm indexes and current rows: no derived corpus or worker.
  * The tagged comment/document sets are evaluated once, not once per task.
  */
-export function taskSearchCtes(companyId: string, search: TaskSearch, includeContext = true, fallbackFilters?: SQL): SQL {
+export function taskSearchCtes(companyId: string, search: TaskSearch, includeContext = true, fallbackFilters?: SQL, authorization?: Omit<AuthorizedResourceQuery, "companyId" | "resource">): SQL {
+  const admission = (id: SQLWrapper, company: SQLWrapper) => authorization
+    ? authorizedResourcePredicate({ ...authorization, companyId, resource: { type: "issue", id, companyId: company } }) : sql`true`;
+  const documentCreator = (id: SQLWrapper) => authorization
+    ? sql`(${id} is null or ${authorizedResourcePredicate({ ...authorization, companyId, resource: { type: "agent", id, companyId: sql`body.company_id` } })})` : sql`true`;
   const n = search.tokens.length;
   const comments = n === 0 || !includeContext ? sql`SELECT NULL::uuid AS issue_id, 0 AS ord WHERE false`
     : sql.join(search.patterns.map((_, index) => sql`
       SELECT c.issue_id, ${index}::int AS ord FROM issue_comments c
-      WHERE c.company_id = ${companyId} AND c.deleted_at IS NULL AND ${taskSearchTermMatch(sql`c.body`, search, index)}
+      WHERE c.company_id = ${companyId} AND ${admission(sql`c.issue_id`, sql`c.company_id`)} AND c.deleted_at IS NULL AND ${taskSearchTermMatch(sql`c.body`, search, index)}
       GROUP BY c.issue_id
     `), sql` UNION ALL `);
   const documents = n === 0 || !includeContext ? sql`SELECT NULL::uuid AS issue_id, 0 AS ord WHERE false`
     : sql.join(search.patterns.map((_, index) => sql`
       SELECT d.issue_id, ${index}::int AS ord FROM issue_documents d
       JOIN documents body ON body.id = d.document_id AND body.company_id = d.company_id
-      WHERE d.company_id = ${companyId} AND (${taskSearchTermMatch(sql`body.title`, search, index)} OR ${taskSearchTermMatch(sql`body.latest_body`, search, index)})
+      WHERE d.company_id = ${companyId} AND ${documentCreator(sql`body.created_by_agent_id`)} AND ${documentCreator(sql`body.updated_by_agent_id`)} AND ${admission(sql`d.issue_id`, sql`d.company_id`)}
+        AND ${authorization ? sql`not exists (select 1 from issue_documents provenance where provenance.document_id = body.id and not ${admission(sql`provenance.issue_id`, sql`provenance.company_id`)})` : sql`true`} AND (${taskSearchTermMatch(sql`body.title`, search, index)} OR ${taskSearchTermMatch(sql`body.latest_body`, search, index)})
       GROUP BY d.issue_id
     `), sql` UNION ALL `);
   const titleTerms = search.patterns.map((_, index) => taskSearchTermMatch(sql`issues.title`, search, index));
@@ -161,7 +168,7 @@ export function taskSearchCtes(companyId: string, search: TaskSearch, includeCon
     document_matches AS MATERIALIZED (${documents}),
     literal_candidates AS MATERIALIZED (
       SELECT issues.id FROM issues
-      WHERE issues.company_id = ${companyId} AND ${visibleIssueCondition()}
+      WHERE issues.company_id = ${companyId} AND ${visibleIssueCondition()} AND ${admission(sql`issues.id`, sql`issues.company_id`)}
         AND ${n === 0 ? sql`${search.normalizedQuery.length === 0}` : sql`(
           ${taskSearchAny(sql`issues.title`, search)}
           OR ${taskSearchAny(sql`issues.identifier`, search)}
@@ -172,7 +179,7 @@ export function taskSearchCtes(companyId: string, search: TaskSearch, includeCon
       UNION SELECT issue_id FROM document_matches
     ), search_flags AS MATERIALIZED (
       ${flags(sql`false`)}
-      WHERE issues.company_id = ${companyId} AND ${visibleIssueCondition()}
+      WHERE issues.company_id = ${companyId} AND ${visibleIssueCondition()} AND ${admission(sql`issues.id`, sql`issues.company_id`)}
         AND issues.id IN (SELECT id FROM literal_candidates)
     ), literal_matches AS MATERIALIZED (
       SELECT * FROM search_flags
@@ -184,7 +191,7 @@ export function taskSearchCtes(companyId: string, search: TaskSearch, includeCon
         JOIN issues ON issues.id = literal.id
         ${fallbackFilters ? sql`WHERE ${fallbackFilters}` : sql``}
       )
-        AND issues.company_id = ${companyId} AND ${visibleIssueCondition()}
+        AND issues.company_id = ${companyId} AND ${visibleIssueCondition()} AND ${admission(sql`issues.id`, sql`issues.company_id`)}
         AND ${fuzzy}
     ), matched AS MATERIALIZED (
       SELECT * FROM literal_matches

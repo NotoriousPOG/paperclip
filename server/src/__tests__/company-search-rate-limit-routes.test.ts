@@ -2,6 +2,7 @@ import express from "express";
 import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 import { issueRoutes } from "../routes/issues.js";
+import { unscopedQueryDb } from "./helpers/unscoped-query-db.js";
 import { createCompanySearchRateLimiter } from "../services/company-search-rate-limit.js";
 import type { CompanySearchQuery, CompanySearchResponse } from "@paperclipai/shared";
 
@@ -43,7 +44,7 @@ describe("company search route rate limiting", () => {
       };
       next();
     });
-    app.use("/api", issueRoutes({} as never, {} as never, {
+    app.use("/api", issueRoutes(unscopedQueryDb() as never, {} as never, {
       searchService: { search },
       searchRateLimiter: createCompanySearchRateLimiter({
         maxRequests: 1,
@@ -75,7 +76,7 @@ describe("company search route rate limiting", () => {
       };
       next();
     });
-    app.use("/api", issueRoutes({} as never, {} as never, {
+    app.use("/api", issueRoutes(unscopedQueryDb() as never, {} as never, {
       searchService: { search },
       searchRateLimiter: createCompanySearchRateLimiter({
         maxRequests: 10,
@@ -103,7 +104,7 @@ describe("company search route rate limiting", () => {
       };
       next();
     });
-    app.use("/api", issueRoutes({} as never, {} as never, {
+    app.use("/api", issueRoutes(unscopedQueryDb() as never, {} as never, {
       searchService: { search },
       searchRateLimiter: createCompanySearchRateLimiter({
         maxRequests: 10,

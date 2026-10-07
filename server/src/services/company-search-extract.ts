@@ -10,6 +10,7 @@ import {
   type CompanySearchExtractSourceRef,
 } from "@paperclipai/shared";
 import { visibleIssueCondition } from "./issue-visibility.js";
+import { authorizedResourcePredicate, issueReadPredicate, type ResourceReadAuthorization } from "./authorized-resource-query.js";
 
 const EXCERPT_MAX_CHARS = 180;
 const URL_PATTERN = /(?:https?:\/\/|www\.)[^\s<>"'`]+|(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}\/[^\s<>"'`]+/giu;
@@ -149,9 +150,45 @@ function extractMatches(sources: ExtractSource[], query: CompanySearchExtractQue
   return { matches, matchesTruncated };
 }
 
+function readableDocument(
+  companyId: string,
+  authorization: ResourceReadAuthorization | undefined,
+  documentId: SQLWrapper,
+  createdByAgentId: SQLWrapper,
+  updatedByAgentId: SQLWrapper,
+  documentCompanyId: SQLWrapper,
+) {
+  if (!authorization) return undefined;
+  return sql`(
+    not exists (
+      select 1 from issue_documents provenance
+      where provenance.document_id = ${documentId}
+        and not ${authorizedResourcePredicate({
+          ...authorization,
+          companyId,
+          resource: { type: "issue", id: sql`provenance.issue_id`, companyId: sql`provenance.company_id` },
+        })}
+    )
+    and (${createdByAgentId} is null or ${authorizedResourcePredicate({
+      ...authorization,
+      companyId,
+      resource: { type: "agent", id: createdByAgentId, companyId: documentCompanyId },
+    })})
+    and (${updatedByAgentId} is null or ${authorizedResourcePredicate({
+      ...authorization,
+      companyId,
+      resource: { type: "agent", id: updatedByAgentId, companyId: documentCompanyId },
+    })})
+  )`;
+}
+
 export function companySearchExtractService(db: Db) {
   return {
-    extract: async (companyId: string, query: CompanySearchExtractQuery): Promise<CompanySearchExtractResponse> => {
+    extract: async (
+      companyId: string,
+      query: CompanySearchExtractQuery,
+      authorization?: ResourceReadAuthorization,
+    ): Promise<CompanySearchExtractResponse> => {
       const containsPattern = `%${escapeLikePattern(query.contains)}%`;
       const urlPattern = urlContainsPattern(query.contains);
       const scopeConditions: SQL[] = [];
@@ -182,6 +219,14 @@ export function companySearchExtractService(db: Db) {
             AND extract_documents.company_id = extract_issue_documents.company_id
           WHERE extract_issue_documents.company_id = ${companyId}
             AND extract_issue_documents.issue_id = ${issues.id}
+            AND ${readableDocument(
+              companyId,
+              authorization,
+              sql`extract_documents.id`,
+              sql`extract_documents.created_by_agent_id`,
+              sql`extract_documents.updated_by_agent_id`,
+              sql`extract_documents.company_id`,
+            ) ?? sql`true`}
             AND (
               ${query.kind === "url"
                 ? sql`extract_documents.title ~* ${urlPattern}`
@@ -196,8 +241,9 @@ export function companySearchExtractService(db: Db) {
       const conditions: SQL[] = [
         eq(issues.companyId, companyId),
         visibleIssueCondition(),
+        authorization ? issueReadPredicate(companyId, authorization, issues.id, issues.companyId) : undefined,
         or(...scopeConditions)!,
-      ];
+      ].filter((condition): condition is SQL => condition !== undefined);
       if (query.status.length > 0) conditions.push(inArray(issues.status, query.status));
       const updatedWithin = updatedWithinStart(query.updatedWithin);
       if (updatedWithin) conditions.push(gte(issues.updatedAt, updatedWithin));
@@ -291,6 +337,14 @@ export function companySearchExtractService(db: Db) {
           .where(and(
             eq(issueDocuments.companyId, companyId),
             inArray(issueDocuments.issueId, issueIds),
+            readableDocument(
+              companyId,
+              authorization,
+              documents.id,
+              documents.createdByAgentId,
+              documents.updatedByAgentId,
+              documents.companyId,
+            ),
             or(
               contentMatch(documents.title, query, containsPattern, urlPattern),
               contentMatch(documents.latestBody, query, containsPattern, urlPattern),

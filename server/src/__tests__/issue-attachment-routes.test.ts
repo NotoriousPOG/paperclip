@@ -4,6 +4,7 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { StorageService } from "../storage/types.js";
+import { unscopedQueryDb } from "./helpers/unscoped-query-db.js";
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -171,7 +172,7 @@ async function createApp(storage: StorageService, options?: { companyIds?: strin
     };
     next();
   });
-  app.use("/api", issueRoutes({} as any, storage));
+  app.use("/api", issueRoutes(unscopedQueryDb() as any, storage));
   app.use(errorHandler);
   return app;
 }

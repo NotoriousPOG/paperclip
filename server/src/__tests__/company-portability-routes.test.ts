@@ -2,6 +2,9 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const mockResourceScope = vi.hoisted(() => vi.fn(async () => ({ allowed: true, restricted: false })));
+vi.mock("../services/resource-scope-authorization.js", () => ({ resourceScopeAuthorizationService: () => ({ decide: mockResourceScope }) }));
+
 const mockCompanyService = vi.hoisted(() => ({
   list: vi.fn(),
   stats: vi.fn(),
@@ -336,6 +339,7 @@ const importMeta = {
 
 describe("company portability routes", () => {
   beforeEach(() => {
+    mockResourceScope.mockReset().mockResolvedValue({ allowed: true, restricted: false });
     vi.clearAllMocks();
     mockAgentService.getById.mockImplementation(async (id: string) => ({
       id,
@@ -359,6 +363,18 @@ describe("company portability routes", () => {
       agents: [],
       warnings: [],
     });
+  });
+
+  it("denies all export variants when restricted scope authorization fails", async () => {
+    mockResourceScope.mockResolvedValue({ allowed: false, restricted: true });
+    const app = await createApp({ type: "board", userId: "owner", companyIds: [companyId], source: "session", isInstanceAdmin: true });
+    for (const suffix of ["export", "exports", "exports/preview"]) {
+      const res = await request(app).post(`/api/companies/${companyId}/${suffix}`).send(exportRequest);
+      expect(res.status).toBe(403);
+    }
+    expect((await request(app).get(`/api/companies/${companyId}/export/fidelity`)).status).toBe(403);
+    expect(mockCompanyPortabilityService.exportBundle).not.toHaveBeenCalled();
+    expect(mockCompanyPortabilityService.previewExport).not.toHaveBeenCalled();
   });
 
   it("rejects non-CEO agents from CEO-safe export preview routes", async () => {

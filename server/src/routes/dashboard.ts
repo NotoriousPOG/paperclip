@@ -1,3 +1,5 @@
+import { resourceScopeAuthorizationService } from "../services/resource-scope-authorization.js";
+import { forbidden } from "../errors.js";
 import { Router } from "express";
 import type { Db } from "@paperclipai/db";
 import { dashboardService } from "../services/dashboard.js";
@@ -27,6 +29,9 @@ export function dashboardRoutes(db: Db) {
   router.get("/companies/:companyId/dashboard", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
+    const scope = await resourceScopeAuthorizationService(db).decide({ actor: req.actor,
+      action: "company_scope:read", resource: { type: "company", companyId } });
+    if (!scope.allowed) throw forbidden("Company summary is outside the current access scope");
     const summary = await svc.summary(companyId);
     res.json(summary);
   });
@@ -34,6 +39,9 @@ export function dashboardRoutes(db: Db) {
   router.get("/companies/:companyId/recovery-observability", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
+    const scope = await resourceScopeAuthorizationService(db).decide({ actor: req.actor,
+      action: "company_scope:read", resource: { type: "company", companyId } });
+    if (!scope.allowed) throw forbidden("Company summary is outside the current access scope");
     const weeks = parsePositiveNumber(req.query.weeks, 8, MAX_WINDOW_WEEKS);
     const thresholdPercent = parsePositiveNumber(
       req.query.threshold,

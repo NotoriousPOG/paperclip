@@ -36,10 +36,12 @@ import {
   type CompanySearchSort,
   type CompanySearchUpdatedWithinOption,
 } from "@paperclipai/shared";
-import { companyArtifactsService } from "./company-artifacts.js";
+import { companyArtifactsService, artifactAuthorizationConditions, type CompanyResourceAuthorization } from "./company-artifacts.js";
 import { companySearchExtractService } from "./company-search-extract.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
 import { parseTaskSearch, taskSearchCtes, taskSearchScore, taskSearchFieldMatch, taskSearchTermMatch } from "./task-search.js";
+
+import { authorizedResourcePredicate } from "./authorized-resource-query.js";
 
 const SNIPPET_MAX_CHARS = 240;
 export const COMPANY_SEARCH_BRANCH_FETCH_LIMIT = COMPANY_SEARCH_MAX_OFFSET + COMPANY_SEARCH_MAX_LIMIT + 1;
@@ -538,8 +540,15 @@ export function companySearchBranchFetchLimit(limit: number, offset = 0) {
 export function companySearchService(db: Db) {
   const extractService = companySearchExtractService(db);
   return {
-    extract: extractService.extract,
-    search: async (companyId: string, query: CompanySearchQuery): Promise<CompanySearchResponse> => {
+    extract: (
+      companyId: string,
+      query: Parameters<typeof extractService.extract>[1],
+      authorization?: CompanyResourceAuthorization,
+    ) => extractService.extract(companyId, query, authorization),
+    search: async (companyId: string, query: CompanySearchQuery, authorization?: CompanyResourceAuthorization): Promise<CompanySearchResponse> => {
+      const artifactAdmission = artifactAuthorizationConditions(companyId, authorization);
+      const agentAdmission = authorization ? authorizedResourcePredicate({ ...authorization, companyId, resource: { type: "agent", id: agents.id, companyId: agents.companyId } }) : sql`true`;
+      const projectAdmission = authorization ? authorizedResourcePredicate({ ...authorization, companyId, resource: { type: "project", id: projects.id, companyId: projects.companyId } }) : sql`true`;
       const taskSearch = parseTaskSearch(query.q);
       const normalizedQuery = taskSearch.normalizedQuery;
       const hasSearchText = normalizedQuery.length > 0;
@@ -718,7 +727,7 @@ export function companySearchService(db: Db) {
         }
 
         const resultRows = await db.execute(sql`
-          ${taskSearchCtes(companyId, taskSearch, scope !== "issues", and(...issueFilters))}
+          ${taskSearchCtes(companyId, taskSearch, scope !== "issues", and(...issueFilters), authorization)}
           ${sql.join(branches, sql` UNION ALL `)}
         `) as unknown as Array<SearchAggregateRow & Omit<IssueSearchRow, "commentSnippet" | "commentId" | "documentSnippet" | "documentTitle" | "documentKey">>;
 
@@ -799,6 +808,7 @@ export function companySearchService(db: Db) {
             SELECT search_comments.id, search_comments.body
             FROM issue_comments search_comments
             WHERE search_comments.company_id = ${companyId}
+              AND ${authorization ? authorizedResourcePredicate({ ...authorization, companyId, resource: { type: "issue", id: sql`target.id`, companyId: sql`search_comments.company_id` } }) : sql`true`}
               AND search_comments.issue_id = target.id
               AND search_comments.deleted_at IS NULL
               AND (
@@ -818,7 +828,12 @@ export function companySearchService(db: Db) {
               ON search_documents.id = search_issue_documents.document_id
               AND search_documents.company_id = search_issue_documents.company_id
             WHERE search_issue_documents.company_id = ${companyId}
+              AND ${authorization ? authorizedResourcePredicate({ ...authorization, companyId, resource: { type: "issue", id: sql`target.id`, companyId: sql`search_issue_documents.company_id` } }) : sql`true`}
               AND search_issue_documents.issue_id = target.id
+              AND ${authorization ? sql`not exists (select 1 from issue_documents provenance where provenance.document_id = search_documents.id
+                and not ${authorizedResourcePredicate({ ...authorization, companyId, resource: { type: "issue", id: sql`provenance.issue_id`, companyId: sql`provenance.company_id` } })})` : sql`true`}
+              AND ${authorization ? sql`(search_documents.created_by_agent_id is null or ${authorizedResourcePredicate({ ...authorization, companyId, resource: { type: "agent", id: sql`search_documents.created_by_agent_id`, companyId: sql`search_documents.company_id` } })})
+                and (search_documents.updated_by_agent_id is null or ${authorizedResourcePredicate({ ...authorization, companyId, resource: { type: "agent", id: sql`search_documents.updated_by_agent_id`, companyId: sql`search_documents.company_id` } })})` : sql`true`}
               AND (
                 ${taskSearchFieldMatch(sql`search_documents.title`, taskSearch)}
                 OR ${taskSearchFieldMatch(sql`search_documents.latest_body`, taskSearch)}
@@ -881,7 +896,7 @@ export function companySearchService(db: Db) {
             updatedAt: agents.updatedAt,
           })
           .from(agents)
-          .where(and(eq(agents.companyId, companyId), simpleCondition))
+          .where(and(eq(agents.companyId, companyId), simpleCondition, agentAdmission))
           .orderBy(desc(agents.updatedAt), desc(agents.id))
           .limit(fetchLimit);
       }
@@ -897,7 +912,7 @@ export function companySearchService(db: Db) {
             updatedAt: projects.updatedAt,
           })
           .from(projects)
-          .where(and(eq(projects.companyId, companyId), isNull(projects.archivedAt), projectCondition))
+          .where(and(eq(projects.companyId, companyId), isNull(projects.archivedAt), projectCondition, projectAdmission))
           .orderBy(desc(projects.updatedAt), desc(projects.id))
           .limit(fetchLimit);
       }
@@ -906,11 +921,13 @@ export function companySearchService(db: Db) {
         if (!hasSearchText) return 0;
         const artifactIssueFilters = issueFilterConditions(companyId, filters);
         const artifactIssueConditions = [
+          artifactAdmission.issue,
           eq(issues.companyId, companyId),
           visibleIssueCondition(),
           ...artifactIssueFilters,
         ];
         const documentArtifactConditions = [
+          artifactAdmission.document,
           eq(issueDocuments.companyId, companyId),
           eq(documents.companyId, companyId),
           or(isNotNull(documents.createdByAgentId), isNotNull(documents.updatedByAgentId))!,
@@ -924,6 +941,7 @@ export function companySearchService(db: Db) {
           ...artifactIssueConditions,
         ];
         const workProductConditions = [
+          artifactAdmission.workProduct,
           eq(issueWorkProducts.companyId, companyId),
           eq(issueWorkProducts.type, "artifact"),
           eq(issueWorkProducts.provider, "paperclip"),
@@ -936,6 +954,7 @@ export function companySearchService(db: Db) {
           ...artifactIssueConditions,
         ];
         const attachmentConditions = [
+          artifactAdmission.attachment,
           eq(issueAttachments.companyId, companyId),
           isNull(issueAttachments.issueCommentId),
           isNotNull(assets.createdByAgentId),
@@ -975,7 +994,7 @@ export function companySearchService(db: Db) {
         const rows = await db
           .select({ count: sql<number>`count(*)::int` })
           .from(agents)
-          .where(and(eq(agents.companyId, companyId), simpleCondition));
+          .where(and(eq(agents.companyId, companyId), simpleCondition, agentAdmission));
         return Number(rows[0]?.count ?? 0);
       }
 
@@ -984,7 +1003,7 @@ export function companySearchService(db: Db) {
         const rows = await db
           .select({ count: sql<number>`count(*)::int` })
           .from(projects)
-          .where(and(eq(projects.companyId, companyId), isNull(projects.archivedAt), projectCondition));
+          .where(and(eq(projects.companyId, companyId), isNull(projects.archivedAt), projectCondition, projectAdmission));
         return Number(rows[0]?.count ?? 0);
       }
 
@@ -993,7 +1012,7 @@ export function companySearchService(db: Db) {
         const result = await companyArtifactsService(db).list(companyId, {
           q: normalizedQuery.slice(0, COMPANY_ARTIFACTS_MAX_QUERY_LENGTH),
           limit: Math.min(fetchLimit, COMPANY_ARTIFACTS_MAX_LIMIT),
-        }, { issueConditions: issueFilters });
+        }, { issueConditions: issueFilters, authorization });
         return result.artifacts;
       }
 
@@ -1112,7 +1131,7 @@ export function companySearchService(db: Db) {
       const issueIds = paged.flatMap((result) => result.issue ? [result.issue.id] : []);
       if (issueIds.length > 0) {
         const states = await db.select({ id: issues.id, state: externalConversationStateSql() }).from(issues)
-          .where(and(eq(issues.companyId, companyId), inArray(issues.id, issueIds)));
+          .where(and(eq(issues.companyId, companyId), inArray(issues.id, issueIds), artifactAdmission.issue));
         const byId = new Map(states.map((row) => [row.id, row.state]));
         for (const result of paged) {
           if (result.issue) result.issue.externalConversationState = byId.get(result.issue.id) ?? null;

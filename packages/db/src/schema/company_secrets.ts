@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, pgTable, uuid, text, timestamp, integer, jsonb, index, uniqueIndex } from "drizzle-orm/pg-core";
+import { check, pgTable, uuid, text, timestamp, integer, jsonb, index, unique, uniqueIndex } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 import { companySecretProviderConfigs } from "./company_secret_provider_configs.js";
@@ -33,6 +33,7 @@ export const companySecrets = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    companyIdUnique: unique("company_secrets_company_id_uq").on(table.companyId, table.id),
     companyIdx: index("company_secrets_company_idx").on(table.companyId),
     companyScopeIdx: index("company_secrets_company_scope_idx").on(table.companyId, table.scope),
     companyOwnerIdx: index("company_secrets_company_owner_idx").on(table.companyId, table.ownerUserId),

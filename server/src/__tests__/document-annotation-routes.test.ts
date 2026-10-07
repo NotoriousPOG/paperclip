@@ -1,4 +1,5 @@
 import express from "express";
+import { unscopedQueryDb } from "./helpers/unscoped-query-db.js";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -181,7 +182,7 @@ async function createApp(actor: "board" | "agent" = "board", actorCompanyId = co
       };
     next();
   });
-  app.use("/api", issueRoutes({} as any, {} as any));
+  app.use("/api", issueRoutes(unscopedQueryDb() as any, {} as any));
   app.use(errorHandler);
   return app;
 }

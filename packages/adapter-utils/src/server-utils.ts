@@ -3509,7 +3509,16 @@ export function sanitizeInheritedPaperclipEnv(
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...baseEnv };
   delete env.PAPERCLIPAI_CMD;
+  // The host's control-plane credentials are never ambient agent authority.
+  // Explicit task credential bindings are merged separately by runChildProcess.
+  const hostOnlyKeys = new Set([
+    "DATABASE_URL", "DATABASE_MIGRATION_URL", "BETTER_AUTH_SECRET",
+    "PGHOST", "PGHOSTADDR", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD",
+    "PGPASSFILE", "PGSERVICE", "PGSERVICEFILE", "PGOPTIONS",
+    "PGSSLCERT", "PGSSLKEY", "PGSSLROOTCERT", "PGSSLCRL", "PGSSLCRLDIR",
+  ]);
   for (const key of Object.keys(env)) {
+    if (hostOnlyKeys.has(key.toUpperCase())) { delete env[key]; continue; }
     if (AGENT_IDENTITY_ENV_KEYS.includes(key.toUpperCase())) {
       delete env[key];
       continue;

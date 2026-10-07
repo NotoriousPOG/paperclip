@@ -1,3 +1,5 @@
+import { resourceScopeAuthorizationService } from "../services/resource-scope-authorization.js";
+import { isPrivateTeamPrincipal } from "../services/private-team-access.js";
 import { createHash } from "node:crypto";
 import type { IncomingMessage, Server as HttpServer } from "node:http";
 import { createRequire } from "node:module";
@@ -260,9 +262,25 @@ export function setupLiveEventsWebSocketServer(
       return;
     }
 
-    const unsubscribe = subscribeCompanyLiveEvents(context.companyId, (event) => {
+    const unsubscribe = subscribeCompanyLiveEvents(context.companyId, async (event) => {
       if (socket.readyState !== WebSocket.OPEN) return;
-      socket.send(JSON.stringify(event));
+      try {
+        if ((context.actorType === "agent" || opts.deploymentMode !== "local_trusted") && await isPrivateTeamPrincipal(db, context.companyId, context.actorType === "agent" ? "agent" : "user", context.actorId)) {
+          socket.close(1008, "Private team streams are not enabled");
+          return;
+        }
+        const scope = await resourceScopeAuthorizationService(db).decide({
+          actor: context.actorType === "agent"
+            ? { type: "agent", agentId: context.actorId, companyId: context.companyId }
+            : { type: "board", userId: context.actorId },
+          action: "company_scope:read", resource: { type: "company", companyId: context.companyId },
+        });
+        if (!scope.allowed) {
+          socket.close(1008, "Company stream is outside the current access scope");
+          return;
+        }
+        if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(event));
+      } catch { socket.close(1011, "Authorization unavailable"); }
     });
 
     cleanupByClient.set(socket, unsubscribe);
@@ -321,8 +339,8 @@ export function setupLiveEventsWebSocketServer(
       resolveSessionFromHeaders: opts.resolveSessionFromHeaders,
       resolveCloudActor: opts.resolveCloudActor,
     })
-      .then((context) => {
-        if (!context) {
+      .then(async (context) => {
+        if (!context || ((context.actorType === "agent" || opts.deploymentMode !== "local_trusted") && await isPrivateTeamPrincipal(db, context.companyId, context.actorType === "agent" ? "agent" : "user", context.actorId))) {
           rejectUpgrade(socket, "403 Forbidden", "forbidden");
           return;
         }

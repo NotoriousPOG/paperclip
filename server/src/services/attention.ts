@@ -48,6 +48,8 @@ import type {
   IssueReviewPolicy,
 } from "@paperclipai/shared";
 import { badRequest } from "../errors.js";
+import { issueReadPredicate, resourceReadPredicate, type ResourceReadAuthorization } from "./authorized-resource-query.js";
+import { artifactAuthorizationConditions } from "./company-artifacts.js";
 import { listAttentionExhaustedRuns } from "./attention-exhausted-runs.js";
 import { budgetService } from "./budgets.js";
 import {
@@ -158,6 +160,8 @@ type AttentionListOptions = AttentionFeedQuery & {
   userId?: string | null;
   /** Internal-only escape hatch for callers that need one stable, unpaginated feed snapshot. */
   allowUnscopedAll?: boolean;
+  /** Trusted server identity only. Never take this from the query string. */
+  authorization?: ResourceReadAuthorization;
 };
 
 type AttentionServiceOptions = {
@@ -814,7 +818,12 @@ async function dismissalByKey(db: Db, companyId: string, userId: string | null |
   }]));
 }
 
-async function issueSummaryMap(db: Db, companyId: string, issueIds: Array<string | null | undefined>) {
+async function issueSummaryMap(
+  db: Db,
+  companyId: string,
+  issueIds: Array<string | null | undefined>,
+  authorization?: ResourceReadAuthorization,
+) {
   const ids = [...new Set(issueIds.filter((value): value is string => Boolean(value)))];
   if (ids.length === 0) return new Map<string, IssueSummaryRow>();
   const rows = await db
@@ -843,7 +852,12 @@ async function issueSummaryMap(db: Db, companyId: string, issueIds: Array<string
       eq(issues.projectWorkspaceId, projectWorkspaces.id),
       eq(projectWorkspaces.companyId, companyId),
     ))
-    .where(and(eq(issues.companyId, companyId), inArray(issues.id, ids), executionIssueCondition()));
+    .where(and(
+      eq(issues.companyId, companyId),
+      inArray(issues.id, ids),
+      executionIssueCondition(),
+      issueReadPredicate(companyId, authorization, issues.id, issues.companyId),
+    ));
   return new Map(rows.map((row) => [row.id, {
     id: row.id,
     companyId: row.companyId,
@@ -899,7 +913,12 @@ async function issueImageMap(db: Db, companyId: string, issueIds: Array<string |
   return map;
 }
 
-async function planDocumentMap(db: Db, companyId: string, issueIds: Array<string | null | undefined>) {
+async function planDocumentMap(
+  db: Db,
+  companyId: string,
+  issueIds: Array<string | null | undefined>,
+  authorization?: ResourceReadAuthorization,
+) {
   const ids = [...new Set(issueIds.filter((value): value is string => Boolean(value)))];
   if (ids.length === 0) return new Map<string, PlanDocumentSummary>();
   const rows = await db
@@ -915,11 +934,17 @@ async function planDocumentMap(db: Db, companyId: string, issueIds: Array<string
       eq(documents.companyId, companyId),
       eq(issueDocuments.key, "plan"),
       inArray(issueDocuments.issueId, ids),
+      ...(authorization ? [artifactAuthorizationConditions(companyId, authorization).document] : []),
     ));
   return new Map(rows.map((row) => [row.issueId, { title: row.title, body: row.body }]));
 }
 
-async function blockingIssueMap(db: Db, companyId: string, blockedIssueIds: Array<string | null | undefined>) {
+async function blockingIssueMap(
+  db: Db,
+  companyId: string,
+  blockedIssueIds: Array<string | null | undefined>,
+  authorization?: ResourceReadAuthorization,
+) {
   const ids = [...new Set(blockedIssueIds.filter((value): value is string => Boolean(value)))];
   if (ids.length === 0) return new Map<string, BlockingIssueSummary>();
   const rows = await db
@@ -937,6 +962,7 @@ async function blockingIssueMap(db: Db, companyId: string, blockedIssueIds: Arra
       eq(issueRelations.type, "blocks"),
       inArray(issueRelations.relatedIssueId, ids),
       isNull(issues.hiddenAt),
+      issueReadPredicate(companyId, authorization, issues.id, issues.companyId),
     ))
     .orderBy(asc(issueRelations.relatedIssueId), asc(issueRelations.createdAt), asc(issueRelations.id));
   const map = new Map<string, BlockingIssueSummary>();
@@ -959,7 +985,12 @@ type BlockedWorkEdge = {
  * Per-root visited sets make corrupt cycles harmless; the blocker analyzer's
  * existing traversal caps bound unusually large graphs.
  */
-async function blockedWorkCountMap(db: Db, companyId: string, blockerIssueIds: string[]) {
+async function blockedWorkCountMap(
+  db: Db,
+  companyId: string,
+  blockerIssueIds: string[],
+  authorization?: ResourceReadAuthorization,
+) {
   const rootIds = [...new Set(blockerIssueIds)];
   const seenByRoot = new Map(rootIds.map((rootId) => [rootId, new Set<string>()]));
   if (rootIds.length === 0) return new Map<string, number>();
@@ -981,6 +1012,7 @@ async function blockedWorkCountMap(db: Db, companyId: string, blockerIssueIds: s
           eq(issues.companyId, companyId),
           isNull(issues.hiddenAt),
           notInArray(issues.status, ["done", "cancelled"]),
+          issueReadPredicate(companyId, authorization, issues.id, issues.companyId),
         ));
       const childRowsPromise: Promise<BlockedWorkEdge[]> = includeChildren
         ? db
@@ -994,6 +1026,7 @@ async function blockedWorkCountMap(db: Db, companyId: string, blockerIssueIds: s
             inArray(issues.parentId, chunk),
             isNull(issues.hiddenAt),
             notInArray(issues.status, ["done", "cancelled"]),
+            issueReadPredicate(companyId, authorization, issues.id, issues.companyId),
           ))
         : Promise.resolve([]);
       const [dependentRows, childRows] = await Promise.all([dependentRowsPromise, childRowsPromise]);
@@ -1083,6 +1116,9 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
       const includeDismissed = options.includeDismissed === true;
       const now = serviceOptions.now?.() ?? Date.now();
       const collected: AttentionItem[] = [];
+      const authorization = options.authorization;
+      const hiddenIssue = (issueId: string | null | undefined, visible: { has(id: string): boolean }) =>
+        Boolean(authorization && issueId && !visible.has(issueId));
 
       const add = (item: AttentionItem) => {
         const dismissal = activeDismissalState(dismissals, item.dismissalKey, item.activityAt, now);
@@ -1120,8 +1156,11 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
       for (const row of approvalIssueRows) {
         if (!approvalIssueMap.has(row.approvalId)) approvalIssueMap.set(row.approvalId, row.issueId);
       }
+      const approvalIssueSummaries = await issueSummaryMap(db, companyId, [...approvalIssueMap.values()], authorization);
 
       for (const approval of pendingApprovals) {
+        const linkedIssueId = approvalIssueMap.get(approval.id) ?? null;
+        if (hiddenIssue(linkedIssueId, approvalIssueSummaries)) continue;
         const dedupKey = `approval:${approval.id}`;
         const title = approvalTitle(approval.type, approval.payload);
         add(createItem({
@@ -1139,7 +1178,7 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
               type: approval.type,
               requestedByAgentId: approval.requestedByAgentId,
               requestedByUserId: approval.requestedByUserId,
-              issueId: approvalIssueMap.get(approval.id) ?? null,
+              issueId: linkedIssueId,
             },
           },
           whyNow: "Approval is pending a board decision.",
@@ -1203,7 +1242,10 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
             status: agents.status,
           })
           .from(agents)
-          .where(eq(agents.companyId, companyId))
+          .where(and(
+            eq(agents.companyId, companyId),
+            resourceReadPredicate(companyId, authorization, { type: "agent", id: agents.id, companyId: agents.companyId }),
+          ))
         : [];
       const companyAgentMap = new Map(companyAgentRows.map((agent) => [agent.id, agent]));
       const boardInteractionRows = interactionRows.filter((row) =>
@@ -1213,12 +1255,13 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
       );
       const visibleInteractionRows = collapsePendingConfirmationsToNewest(boardInteractionRows);
       const [interactionIssueMap, interactionImageMap, interactionPlanDocumentMap] = await Promise.all([
-        issueSummaryMap(db, companyId, visibleInteractionRows.map((row) => row.issueId)),
+        issueSummaryMap(db, companyId, visibleInteractionRows.map((row) => row.issueId), authorization),
         issueImageMap(db, companyId, visibleInteractionRows.map((row) => row.issueId)),
-        planDocumentMap(db, companyId, visibleInteractionRows.map((row) => row.issueId)),
+        planDocumentMap(db, companyId, visibleInteractionRows.map((row) => row.issueId), authorization),
       ]);
 
       for (const interaction of visibleInteractionRows) {
+        if (hiddenIssue(interaction.issueId, interactionIssueMap)) continue;
         const issue = interactionIssueMap.get(interaction.issueId) ?? null;
         const payload = readRecord(interaction.payload);
         const detail = interactionDetail({
@@ -1291,7 +1334,7 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
       const bundleIds = [...new Set(openDecisions.map((decision) => decision.bundleId).filter((value): value is string => Boolean(value)))];
       const bundleTitleMap = new Map<string, string>();
       const [decisionIssueMap, bundleRows] = await Promise.all([
-        issueSummaryMap(db, companyId, openDecisions.map((decision) => decision.originIssueId)),
+        issueSummaryMap(db, companyId, openDecisions.map((decision) => decision.originIssueId), authorization),
         bundleIds.length > 0
           ? db.select({ id: decisionBundles.id, title: decisionBundles.title })
             .from(decisionBundles).where(and(eq(decisionBundles.companyId, companyId), inArray(decisionBundles.id, bundleIds)))
@@ -1299,6 +1342,7 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
       ]);
       for (const row of bundleRows) bundleTitleMap.set(row.id, row.title);
       for (const decision of openDecisions) {
+        if (hiddenIssue(decision.originIssueId, decisionIssueMap)) continue;
         const issue = decisionIssueMap.get(decision.originIssueId) ?? null;
         add(createItem({
           companyId,
@@ -1400,13 +1444,16 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
           db,
           companyId,
           recoveryRows.flatMap((row) => [row.sourceIssueId, row.recoveryIssueId]),
+          authorization,
         ),
         issueImageMap(db, companyId, recoveryRows.map((row) => row.sourceIssueId)),
       ]);
 
       for (const recovery of recoveryRows) {
+        if (hiddenIssue(recovery.sourceIssueId, recoveryIssueMap)) continue;
         const sourceIssue = recoveryIssueMap.get(recovery.sourceIssueId) ?? null;
-        const recoveryIssue = recovery.recoveryIssueId ? recoveryIssueMap.get(recovery.recoveryIssueId) ?? null : null;
+        const recoveryIssueId = hiddenIssue(recovery.recoveryIssueId, recoveryIssueMap) ? null : recovery.recoveryIssueId;
+        const recoveryIssue = recoveryIssueId ? recoveryIssueMap.get(recoveryIssueId) ?? null : null;
         const dedupKey = `recovery:${recovery.kind}:${recovery.sourceIssueId}:${recovery.cause}:${recovery.fingerprint}`;
         add(createItem({
           companyId,
@@ -1425,7 +1472,7 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
               ownerType: recovery.ownerType,
               ownerUserId: recovery.ownerUserId,
               sourceIssueId: recovery.sourceIssueId,
-              recoveryIssueId: recovery.recoveryIssueId,
+              recoveryIssueId,
             },
           },
           whyNow: recovery.status === "escalated"
@@ -1450,7 +1497,11 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
         }));
       }
 
-      const blockedIssues = await issueService(db).list(companyId, { status: "blocked", includeBlockedBy: true });
+      const blockedIssues = await issueService(db).list(companyId, {
+        status: "blocked",
+        includeBlockedBy: true,
+        resourceAuthorization: authorization,
+      });
       type BlockedAttentionIssue = IssueSubjectRow & {
         blockerAttention?: {
           state?: string;
@@ -1467,14 +1518,14 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
         .map((issue) => issue.blockerAttention?.terminalBlockerIssueId)
         .filter((issueId): issueId is string => Boolean(issueId));
       const [blockedIssueSummaries, terminalBlockerSummaries, blockerImageMap, blockingIssues] = await Promise.all([
-        issueSummaryMap(db, companyId, blockedIssues.map((issue) => issue.id)),
-        issueSummaryMap(db, companyId, terminalBlockerIssueIds),
+        issueSummaryMap(db, companyId, blockedIssues.map((issue) => issue.id), authorization),
+        issueSummaryMap(db, companyId, terminalBlockerIssueIds, authorization),
         issueImageMap(
           db,
           companyId,
           [...blockedIssues.map((issue) => issue.id), ...terminalBlockerIssueIds],
         ),
-        blockingIssueMap(db, companyId, blockedIssues.map((issue) => issue.id)),
+        blockingIssueMap(db, companyId, blockedIssues.map((issue) => issue.id), authorization),
       ]);
       const terminalCandidates = new Map<string, {
         issue: BlockedAttentionIssue;
@@ -1534,7 +1585,7 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
         }
       }
 
-      const blockedWorkCounts = await blockedWorkCountMap(db, companyId, [...terminalCandidates.keys()]);
+      const blockedWorkCounts = await blockedWorkCountMap(db, companyId, [...terminalCandidates.keys()], authorization);
       for (const [terminalIssueId, candidate] of terminalCandidates) {
         const blockedTaskCount = blockedWorkCounts.get(terminalIssueId) ?? 0;
         const taskLabel = blockedTaskCount === 1 ? "task" : "tasks";
@@ -1585,7 +1636,12 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
           updatedAt: issues.updatedAt,
         })
         .from(issues)
-        .where(and(eq(issues.companyId, companyId), eq(issues.status, "in_review"), executionIssueCondition()))
+        .where(and(
+          eq(issues.companyId, companyId),
+          eq(issues.status, "in_review"),
+          executionIssueCondition(),
+          issueReadPredicate(companyId, authorization, issues.id, issues.companyId),
+        ))
         .orderBy(desc(issues.updatedAt), desc(issues.id));
       const reviewIssueIds = reviewRows.map((row) => row.id);
       const pendingReviewApprovalRows = reviewIssueIds.length === 0
@@ -1603,7 +1659,7 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
       const pendingApprovalByIssueId = new Map(pendingReviewApprovalRows.map((row) => [row.issueId, row.approvalId]));
       const [reviewAttentionByIssueId, reviewIssueMap, reviewImageMap] = await Promise.all([
         issueService(db).listReviewAttention(companyId, reviewRows),
-        issueSummaryMap(db, companyId, reviewIssueIds),
+        issueSummaryMap(db, companyId, reviewIssueIds, authorization),
         issueImageMap(db, companyId, reviewIssueIds),
       ]);
 
@@ -1661,7 +1717,7 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
         }));
       }
 
-      const failedRows = await listAttentionExhaustedRuns(db, companyId);
+      const failedRows = await listAttentionExhaustedRuns(db, companyId, authorization);
       const failedIssueIds = failedRows.map((row) => readRunIssueId(row.contextSnapshot));
       const failedAgentIds = [...new Set(failedRows.map((row) => row.agentId))];
       const oldestFailedRunCreatedAt = failedRows.reduce<Date | null>((oldest, row) => {
@@ -1673,6 +1729,7 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
           db,
           companyId,
           failedIssueIds,
+          authorization,
         ),
         issueImageMap(db, companyId, failedIssueIds),
         oldestFailedRunCreatedAt && failedAgentIds.length > 0
@@ -1708,6 +1765,7 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
         const hasNewerRun = (latestRunCreatedAtByKey.get(runKey)?.getTime() ?? 0) > run.createdAt.getTime();
         if (hasNewerRun) continue;
 
+        if (hiddenIssue(issueId, failedIssueMap)) continue;
         const issue = issueId ? failedIssueMap.get(issueId) ?? null : null;
         const dedupKey = `run:${run.id}`;
         add(createItem({
@@ -1821,7 +1879,11 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
           updatedAt: agents.updatedAt,
         })
         .from(agents)
-        .where(and(eq(agents.companyId, companyId), eq(agents.status, "error")))
+        .where(and(
+          eq(agents.companyId, companyId),
+          eq(agents.status, "error"),
+          resourceReadPredicate(companyId, authorization, { type: "agent", id: agents.id, companyId: agents.companyId }),
+        ))
         .orderBy(desc(agents.updatedAt), desc(agents.id));
 
       for (const agent of erroredAgents) {

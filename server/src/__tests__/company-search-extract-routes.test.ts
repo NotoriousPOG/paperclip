@@ -8,6 +8,7 @@ import type {
   CompanySearchResponse,
 } from "@paperclipai/shared";
 import { issueRoutes } from "../routes/issues.js";
+import { unscopedQueryDb } from "./helpers/unscoped-query-db.js";
 import { createCompanySearchRateLimiter } from "../services/company-search-rate-limit.js";
 
 function extractResponse(query: CompanySearchExtractQuery): CompanySearchExtractResponse {
@@ -40,7 +41,7 @@ function createApp(companyIds: string[], extract: (companyId: string, query: Com
     };
     next();
   });
-  app.use("/api", issueRoutes({} as never, {} as never, {
+  app.use("/api", issueRoutes(unscopedQueryDb() as never, {} as never, {
     searchService: { search: unusedSearch, extract },
     searchRateLimiter: createCompanySearchRateLimiter({
       maxRequests: 1,

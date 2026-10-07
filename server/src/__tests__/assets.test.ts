@@ -103,7 +103,7 @@ async function createApp(storage: ReturnType<typeof createStorageService>) {
     };
     next();
   });
-  app.use("/api", assetRoutes({} as any, storage));
+  app.use("/api", assetRoutes({ select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }) } as any, storage));
   return app;
 }
 

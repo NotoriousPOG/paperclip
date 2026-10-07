@@ -143,3 +143,5 @@ describe("App Cases routing (PAP-13002)", () => {
     flushSync(() => root.unmount());
   });
 });
+
+vi.mock("./pages/PrivateTeamGate", () => ({ PrivateTeamGate: ({ children }: any) => children }));

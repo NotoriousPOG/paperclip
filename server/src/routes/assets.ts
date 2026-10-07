@@ -2,7 +2,9 @@ import { Router, type Request, type Response } from "express";
 import multer from "multer";
 import createDOMPurify from "dompurify";
 import { JSDOM } from "jsdom";
-import type { Db } from "@paperclipai/db";
+import { caseAttachments, companyLogos, issueAttachments, resourceAccessScopes, runnerApiResponseReservations, type Db } from "@paperclipai/db";
+import { and, eq } from "drizzle-orm";
+import { resourceScopeAuthorizationService } from "../services/resource-scope-authorization.js";
 import { ASSET_NAMESPACE_RULE, createAssetImageMetadataSchema } from "@paperclipai/shared";
 import type { StorageService } from "../storage/types.js";
 import { assetService, logActivity } from "../services/index.js";
@@ -90,6 +92,43 @@ function sanitizeSvgBuffer(input: Buffer): Buffer | null {
 export function assetRoutes(db: Db, storage: StorageService) {
   const router = Router();
   const svc = assetService(db);
+  const scopeAuthorization = resourceScopeAuthorizationService(db);
+
+  async function canReadAsset(req: Request, asset: NonNullable<Awaited<ReturnType<typeof svc.getById>>>) {
+    const companyId = asset.companyId;
+    const scopes = await db.select({ id: resourceAccessScopes.id }).from(resourceAccessScopes)
+      .where(eq(resourceAccessScopes.companyId, companyId)).limit(1);
+    if (!scopes.length) return true;
+
+    // Asset IDs and storage keys are not capabilities. Resolve persisted provenance
+    // before revealing bytes, sizes, ETags, or range errors, including HEAD requests.
+    const attachments = await db.select().from(issueAttachments)
+      .where(eq(issueAttachments.assetId, asset.id));
+    const unsupportedCases = await db.select({ id: caseAttachments.id }).from(caseAttachments)
+      .where(eq(caseAttachments.assetId, asset.id));
+    const savedResponses = await db.select({ id: runnerApiResponseReservations.id }).from(runnerApiResponseReservations)
+      .where(eq(runnerApiResponseReservations.assetId, asset.id));
+    // These sources do not yet carry a complete authorization ancestry. Do not
+    // reinterpret an orphan, case, or saved API response as company-wide content.
+    if (unsupportedCases.length || savedResponses.length) return false;
+    if (!attachments.length) {
+      const logos = await db.select({ id: companyLogos.id }).from(companyLogos)
+        .where(and(eq(companyLogos.assetId, asset.id), eq(companyLogos.companyId, companyId)));
+      if (!logos.length) return false;
+    }
+    for (const attachment of attachments) {
+      if (attachment.companyId !== companyId) return false;
+      const decision = await scopeAuthorization.decide({ actor: req.actor, action: "issue:read",
+        resource: { type: "issue", companyId, issueId: attachment.issueId } });
+      if (!decision.allowed) return false;
+    }
+    if (asset.createdByAgentId) {
+      const decision = await scopeAuthorization.decide({ actor: req.actor, action: "agent:read",
+        resource: { type: "agent", companyId, agentId: asset.createdByAgentId } });
+      if (!decision.allowed) return false;
+    }
+    return true;
+  }
   const assetUpload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: MAX_ATTACHMENT_BYTES, files: 1 },
@@ -327,6 +366,11 @@ export function assetRoutes(db: Db, storage: StorageService) {
     const assetId = req.params.assetId as string;
     const asset = await getAccessibleResource(req, res, svc.getById(assetId), "Asset not found");
     if (!asset) return;
+    res.setHeader("Cache-Control", "private, no-store");
+    if (!await canReadAsset(req, asset)) {
+      res.status(404).json({ error: "Asset not found" });
+      return;
+    }
 
     // Use the persisted size only after resource authorization. Single ranges
     // keep saved API text pages bounded all the way to disk or object storage.
@@ -354,7 +398,7 @@ export function assetRoutes(db: Db, storage: StorageService) {
       res.status(206);
       res.setHeader("Content-Range", `bytes ${range.start}-${range.end}/${asset.byteSize}`);
     }
-    res.setHeader("Cache-Control", "private, max-age=60");
+    res.setHeader("Cache-Control", "private, no-store");
     res.setHeader("X-Content-Type-Options", "nosniff");
     if (!inlineSafe) {
       res.setHeader("Content-Security-Policy", "sandbox; default-src 'none'");

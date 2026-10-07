@@ -1,4 +1,5 @@
 import express from "express";
+import { unscopedQueryDb } from "./helpers/unscoped-query-db.js";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -138,7 +139,7 @@ async function createApp(actor: Record<string, unknown>) {
     (req as any).actor = actor;
     next();
   });
-  app.use("/api", issueRoutes({} as any, {} as any, { feedbackExportService: mockFeedbackExportService }));
+  app.use("/api", issueRoutes(unscopedQueryDb() as any, {} as any, { feedbackExportService: mockFeedbackExportService }));
   const routeErrors: string[] = [];
   app.locals.routeErrors = routeErrors;
   app.use((error: unknown, _req: express.Request, _res: express.Response, next: express.NextFunction) => {

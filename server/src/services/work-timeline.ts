@@ -13,6 +13,7 @@ import {
   issueThreadInteractions,
 } from "@paperclipai/db";
 import { executionIssueCondition } from "./issue-visibility.js";
+import { issueReadPredicate, resourceReadPredicate, type ResourceReadAuthorization } from "./authorized-resource-query.js";
 
 // DTO types are shared with the UI via @paperclipai/shared so both sides consume
 // one contract. Re-exported here for back-compat with existing server imports.
@@ -47,6 +48,7 @@ export interface WorkTimelineQuery {
   limit?: number;
   offset?: number;
   canReadIssue?: (issue: WorkTimelineIssueAccessInput) => Promise<boolean>;
+  authorization?: ResourceReadAuthorization;
 }
 
 export interface WorkTimelineIssueAccessInput {
@@ -170,6 +172,20 @@ function runOverlapsWindow(from: Date, to: Date) {
 }
 
 export function workTimelineService(db: Db) {
+  function readableIssueSql(input: WorkTimelineQuery) {
+    if (!input.authorization) return undefined;
+    return issueReadPredicate(input.companyId, input.authorization, issues.id, issues.companyId);
+  }
+
+  function readableRunAgentSql(input: WorkTimelineQuery) {
+    if (!input.authorization) return undefined;
+    return resourceReadPredicate(input.companyId, input.authorization, {
+      type: "agent",
+      id: heartbeatRuns.agentId,
+      companyId: heartbeatRuns.companyId,
+    });
+  }
+
   async function filterReadableIssues(
     rows: IssueRow[],
     canReadIssue: NonNullable<WorkTimelineQuery["canReadIssue"]> | undefined,
@@ -208,6 +224,7 @@ export function workTimelineService(db: Db) {
     const filterConditions = [
       eq(issues.companyId, input.companyId),
       executionIssueCondition(),
+      readableIssueSql(input),
       input.goalId ? eq(issues.goalId, input.goalId) : undefined,
       input.projectId ? eq(issues.projectId, input.projectId) : undefined,
       input.issueId ? eq(issues.id, input.issueId) : undefined,
@@ -334,6 +351,7 @@ export function workTimelineService(db: Db) {
         and(
           eq(issues.companyId, input.companyId),
           executionIssueCondition(),
+          readableIssueSql(input),
           inArray(issues.id, issueIds),
           input.goalId ? eq(issues.goalId, input.goalId) : undefined,
           input.projectId ? eq(issues.projectId, input.projectId) : undefined,
@@ -420,7 +438,7 @@ export function workTimelineService(db: Db) {
     return rows.filter((issue) => selected.has(issue.id) || byId.get(issue.parentId ?? "") && selected.has(issue.parentId ?? ""));
   }
 
-  async function loadActorMaps(companyId: string, actorIds: Set<string>) {
+  async function loadActorMaps(companyId: string, actorIds: Set<string>, authorization?: ResourceReadAuthorization) {
     const agentIds = Array.from(actorIds)
       .filter((id) => id.startsWith("agent:"))
       .map((id) => id.slice("agent:".length));
@@ -433,7 +451,13 @@ export function workTimelineService(db: Db) {
         ? db
           .select({ id: agents.id, name: agents.name, icon: agents.icon, appearance: agents.appearance })
           .from(agents)
-          .where(and(eq(agents.companyId, companyId), inArray(agents.id, maybeUuidList(agentIds))))
+          .where(and(
+            eq(agents.companyId, companyId),
+            inArray(agents.id, maybeUuidList(agentIds)),
+            authorization
+              ? resourceReadPredicate(companyId, authorization, { type: "agent", id: agents.id, companyId: agents.companyId })
+              : undefined,
+          ))
         : [],
       userIds.length > 0
         ? db
@@ -552,6 +576,7 @@ export function workTimelineService(db: Db) {
           and(
             eq(heartbeatRuns.companyId, input.companyId),
             runOverlapsWindow(from, to),
+            readableRunAgentSql(input),
             inArray(sql<string>`${heartbeatRuns.contextSnapshot} ->> 'issueId'`, readableIssueIds),
           ),
         ),
@@ -577,6 +602,7 @@ export function workTimelineService(db: Db) {
             eq(heartbeatRuns.companyId, input.companyId),
             eq(activityLog.entityType, "issue"),
             inArray(activityLog.entityId, readableIssueIds),
+            readableRunAgentSql(input),
             runOverlapsWindow(from, to),
           ),
         ),
@@ -759,7 +785,21 @@ export function workTimelineService(db: Db) {
       }
     }
 
-    const actorMaps = await loadActorMaps(input.companyId, actorIds);
+    const actorMaps = await loadActorMaps(input.companyId, actorIds, input.authorization);
+    if (input.authorization) {
+      for (const id of [...actorIds]) {
+        if (id.startsWith("agent:") && !actorMaps.agents.has(id.slice("agent:".length))) actorIds.delete(id);
+      }
+    }
+    const visibleEvents = input.authorization ? events.filter((event) => actorIds.has(event.actorId)) : events;
+    const visibleEdges = input.authorization
+      ? edges.filter((edge) => actorIds.has(edge.fromActorId) && actorIds.has(edge.toActorId))
+      : edges;
+    if (input.authorization) {
+      for (const [runId, span] of spanByRunId) {
+        if (!actorIds.has(span.actorId)) spanByRunId.delete(runId);
+      }
+    }
     const actors: WorkTimelineActor[] = Array.from(actorIds).map((id) => {
       const [type, rawId] = id.split(":", 2) as [TimelineActorType, string];
       if (type === "agent") {
@@ -777,8 +817,8 @@ export function workTimelineService(db: Db) {
     return {
       actors,
       spans: Array.from(spanByRunId.values()).sort((left, right) => left.start.localeCompare(right.start)),
-      events: events.sort((left, right) => left.at.localeCompare(right.at)),
-      edges: edges.sort((left, right) => left.at.localeCompare(right.at)),
+      events: visibleEvents.sort((left, right) => left.at.localeCompare(right.at)),
+      edges: visibleEdges.sort((left, right) => left.at.localeCompare(right.at)),
       pagination: {
         limit,
         offset,

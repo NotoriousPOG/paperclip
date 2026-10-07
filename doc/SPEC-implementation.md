@@ -708,6 +708,82 @@ changes so both agent and board edits are visible in the issue activity stream.
 
 Paperclip V1 keeps a company-scoped visibility model as the default because centralized authorization and scoped work-object controls are not yet a core V1 control surface.
 
+The self-hosted permissions build has started with an internal, strictly
+validated resource-policy constraint in the existing authorization service.
+When supplied by trusted server code, it can narrow an existing decision but
+cannot grant access independently. No route currently loads this policy and no
+project privacy control is enabled. Persistence, query filtering, complete
+route coverage, and runtime containment remain release prerequisites. Track
+the implementation and fuzz-testing gates in the
+[self-hosted permissions specification](plans/2026-10-05-self-hosted-agent-user-permissions.md).
+
+The first private-team increment adds an explicit `groups` company membership
+mode, managed by company owners under Settings > Groups & access. Email-bound
+invitations assign Viewer or Contributor membership in a named restricted group.
+The separate Shared workspace UI has been removed at the user's request.
+Restricted accounts see an access notice until permission filtering is integrated
+into the normal interface. Existing scoped resource APIs and stored documents
+remain intact. The membership mode survives removal of the last group.
+
+This increment denies private principals access to unqualified company APIs,
+search, chats, attachments, exports, live event streams, agent execution, and
+tool gateways. It does not make existing projects confidential against existing
+company-wide operators. Assigning a resource to a team does not change those
+operators' existing visibility. Private agent membership requires a paused
+agent and cannot yet execute work. A private membership currently restricts the
+user's general UI/API access across companies; mixed-access navigation is not
+qualified. Local implicit board access remains full-control operator access;
+agent bearer credentials remain subject to the private boundary even locally.
+These limitations must remain visible until the relevant integrations pass
+isolation tests. The broader scoped-resource policy is still a separate internal
+constraint, not the persistence mechanism used for group resource grants.
+
+Company baseline access is additive to private teams. Owners explicitly create
+people or agent baseline audiences and share resources into them. Every active
+member of that audience receives read access to those selected resources, plus
+any private team grants. HR and Finance remain separate branches. Removing HR
+membership retains the company baseline; suspension removes both. Audiences
+are immutable to prevent accidentally publishing an existing private team.
+Delegated agent resource discovery intersects the agent and responsible user's
+current allowed resources. This discovery path does not enable tool execution,
+agent runtime access, or private conversation/memory reuse.
+
+The approved next model replaces manual baseline shares: new ordinary resources
+are company-visible unless created in or explicitly moved to a restricted group.
+A resource has one authoritative scope. Moving it back to company scope is an
+explicit publication action; removing/deleting a group must not implicitly
+publish its resources. This replacement is not enabled yet: the exclusive scope
+schema and visibility resolver exist, but production routes and derived data
+paths are not fully integrated.
+
+Secret values are excluded from automatic baseline access. Restricted secret
+names, bindings, provider metadata, and identifying audit details require scope
+checks as well as secret-value resolution checks. Direct API requests and raw
+application-database access are part of the enforcement boundary. Qualification
+requires a restricted database role, database policies with trusted identity,
+and runtime filesystem/network isolation. Host root and database owners remain
+outside the application authorization boundary. Agent child processes no longer
+inherit the server's database credentials or authentication signing secret;
+this environment filter alone does not qualify restricted execution.
+
+The current enforcement increment loads exclusive agent/project scopes into the
+central evaluator, follows persisted issue ancestry, checks each referenced
+resource's company, and requires Contributor membership for scoped writes.
+Company owners and instance administrators do not override these restrictions.
+Secret catalogs, value resolution, environment secret labels, direct secret
+management, supported issue attachment downloads, company exports, dashboard
+summaries, and stream delivery have additional scope checks. Unsupported asset
+ancestry fails closed. Aggregates require access to every contributing scope.
+
+Until all surfaces are qualified, persisted restrictions activate an instance-wide
+route admission boundary: only exact reviewed routes and non-executing lists in
+unrestricted companies are admitted. Agent dispatch, tool gateways, and runtime
+connection capabilities are disabled instance-wide because host-local execution
+could otherwise read another company's files. This is containment, not completed
+runtime isolation. No production API enables exclusive scope moves yet. Existing
+manual group shares must not be described as private resources for ordinary
+company-mode users. The final baseline/group UI replacement remains pending.
+
 The approved term set is:
 
 - **Agent profile visibility**: identity-level facts needed for delegation and governance (name, role, capabilities, reporting lines).
@@ -1989,6 +2065,13 @@ per-turn snapshot participates in session compatibility, so subsequent turns
 remove stale instructions after edits or access revocation. See
 [Connection instructions](connections/CONNECTION-INSTRUCTIONS.md) for contracts,
 UI conventions, custom adapter integration, and initial memory templates.
+
+The built-in company Settings > Permissions page manages existing explicit user
+and agent grants, including structured task-assignment project/target-agent
+scopes. Its API requires a human company owner, instance administrator, or local
+trusted operator. It protects self/owner/instance-admin grants and audits changes
+transactionally. This editor does not activate restricted-project read privacy;
+role and agent trust defaults remain separate sources of authority.
 
 ### Native provider capacity retry
 

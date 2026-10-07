@@ -10,6 +10,7 @@ import { sanitizeRecord } from "../redaction.js";
 import { badRequest, forbidden } from "../errors.js";
 import { agentActionAuditService } from "../services/agent-action-audit.js";
 import { logActivity } from "../services/activity-log.js";
+import { resourceQueryContext } from "../services/resource-query-context.js";
 
 /** Max rows a single CSV export will stream (guards against runaway exports). */
 const AUDIT_CSV_EXPORT_MAX_ROWS = 10_000;
@@ -207,6 +208,10 @@ export function activityRoutes(db: Db) {
       },
     });
     if (decision.allowed) return true;
+    if (decision.reason === "deny_resource_policy") {
+      res.status(404).json({ error: "Issue not found" });
+      return false;
+    }
     res.status(403).json({ error: "Issue activity is outside this actor's authorization boundary" });
     return false;
   }
@@ -222,7 +227,9 @@ export function activityRoutes(db: Db) {
   router.get("/companies/:companyId/activity", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    if (!(await assertCompanyScopeReadAllowed(req, res, companyId))) return;
+    const authorization = await resourceQueryContext(db, companyId, req.actor);
+    if (authorization) res.setHeader("Cache-Control", "no-store");
+    else if (!(await assertCompanyScopeReadAllowed(req, res, companyId))) return;
 
     const filters = {
       companyId,
@@ -230,6 +237,7 @@ export function activityRoutes(db: Db) {
       entityType: req.query.entityType as string | undefined,
       entityId: req.query.entityId as string | undefined,
       limit: normalizeActivityLimit(Number(req.query.limit)),
+      ...(authorization ? { authorization } : {}),
     };
     const result = await svc.list(filters);
     res.json(result);
@@ -342,6 +350,8 @@ export function activityRoutes(db: Db) {
     const rawId = req.params.id as string;
     const issue = await getAccessibleResource(req, res, resolveIssueByRef(rawId), "Issue not found");
     if (!issue) return;
+    const authorization = await resourceQueryContext(db, issue.companyId, req.actor);
+    if (authorization) res.setHeader("Cache-Control", "no-store");
     if (!(await assertIssueReadAllowed(req, res, issue))) return;
     const result = await svc.forIssue(issue.id);
     res.json(result);
@@ -351,6 +361,8 @@ export function activityRoutes(db: Db) {
     const rawId = req.params.id as string;
     const issue = await getAccessibleResource(req, res, resolveIssueByRef(rawId), "Issue not found");
     if (!issue) return;
+    const authorization = await resourceQueryContext(db, issue.companyId, req.actor);
+    if (authorization) res.setHeader("Cache-Control", "no-store");
     if (!(await assertIssueReadAllowed(req, res, issue))) return;
     const result = await svc.runsForIssue(issue.companyId, issue.id);
     res.json(result);

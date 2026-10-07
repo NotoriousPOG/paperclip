@@ -5,6 +5,7 @@ import { buildAgentIdentityEnv } from "@paperclipai/adapter-utils/server-utils";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 import { prepareConnectionInstructionDelivery } from "./connection-instructions.js";
 import { resolveAssignedConnectionInstructionsForRun } from "./native-runtime/assigned-mcp-tools.js";
+import { PROTECTED_EXECUTION_DENIAL, hasRestrictedResources, isPrivateTeamPrincipal } from "./private-team-access.js";
 import { externalObjectService } from "./external-objects.js";
 import { isAiAuthenticationBlocked } from "./ai-auth-failure.js";
 import { nativeRetryCancellationCommitCondition, rethrowNativeCancellationLockConflict, claimCancellationRequest, startupCancellationFence } from "./native-runtime/native-cancellation-request.js";
@@ -20920,6 +20921,16 @@ export function heartbeatService(
       // Initialization has persisted the active context, including an explicit
       // absence of identity inherited from an automatic continuation.
       responsibleUserId = identityContext.responsibleUserId;
+      // Host-local runtimes can read other companies' server files. Until a
+      // runtime is qualified, restriction anywhere in the instance blocks dispatch.
+      if (await hasRestrictedResources(db)) {
+        throw new Error(PROTECTED_EXECUTION_DENIAL);
+      }
+      if (await isPrivateTeamPrincipal(db, agent.companyId, "agent", agent.id)
+        || await isPrivateTeamPrincipal(db, agent.companyId, "user", responsibleUserId)) {
+        throw new Error("Private team agent execution is not enabled");
+      }
+
       run = {
         ...run,
         activeIdentityContextId: identityContext.id,

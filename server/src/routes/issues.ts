@@ -1,4 +1,5 @@
 import { activeIssueInteractionCondition, readTaskQuestionContext } from "../services/issue-question-context.js";
+import { resourceQueryContext, type ResourceQueryContext } from "../services/resource-query-context.js";
 import { setIssueTitle } from "../services/issue-title.js";
 import { setIssueTitleSchema } from "@paperclipai/shared";
 import { resolveConfirmationFromComment } from "../services/confirmation-comment-resolution.js";
@@ -359,6 +360,7 @@ import {
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 const updateIssueRouteSchema = updateIssueSchema.extend({
   interrupt: z.boolean().optional(),
+  publishPlacement: z.boolean().optional(),
 });
 const queuedCommentMutationTargetSchema = z.object({
   queueId: z.string().min(1),
@@ -475,10 +477,12 @@ type CompanySearchService = {
   extract(
     companyId: string,
     query: CompanySearchExtractQuery,
+    authorization?: ResourceQueryContext,
   ): Promise<CompanySearchExtractResponse>;
   search(
     companyId: string,
     query: CompanySearchQuery,
+    authorization?: ResourceQueryContext,
   ): Promise<CompanySearchResponse>;
 };
 type ActivityIssueRelationSummary = {
@@ -3568,6 +3572,13 @@ export function issueRoutes(
   const documentAnnotationsSvc = documentAnnotationService(db);
   const decisionTrainingSvc = decisionTrainingService(db);
   const issueReferencesSvc = issueReferenceService(db);
+  async function authorizedReferenceSummary(
+    req: Express.Request,
+    issue: { id: string; companyId: string },
+  ) {
+    const authorization = await resourceQueryContext(db, issue.companyId, req.actor);
+    return issueReferencesSvc.listIssueReferenceSummary(issue.id, db, authorization);
+  }
   const issueThreadInteractionsSvc = issueThreadInteractionService(db);
   const questionResponseDeliveries = questionResponseDeliveryService(db, {
     heartbeat,
@@ -5079,9 +5090,9 @@ export function issueRoutes(
     );
     const decision = await value;
     if (decision.allowed) return true;
-    res
-      .status(403)
-      .json({ error: "Issue is outside this actor's authorization boundary" });
+    res.status(decision.reason === "deny_resource_policy" ? 404 : 403).json({
+      error: decision.reason === "deny_resource_policy" ? "Issue not found" : "Issue is outside this actor's authorization boundary",
+    });
     return false;
   }
 
@@ -7772,16 +7783,20 @@ export function issueRoutes(
   router.get("/companies/:companyId/search/extract", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    const companyScopeDecision = await access.decide({
-      actor: req.actor,
-      action: "company_scope:read",
-      resource: { type: "company", companyId },
-    });
-    if (!companyScopeDecision.allowed) {
-      res.status(403).json({
-        error: "Company search is outside this actor's authorization boundary",
+    const authorization = await resourceQueryContext(db, companyId, req.actor);
+    if (authorization) res.setHeader("Cache-Control", "no-store");
+    else {
+      const companyScopeDecision = await access.decide({
+        actor: req.actor,
+        action: "company_scope:read",
+        resource: { type: "company", companyId },
       });
-      return;
+      if (!companyScopeDecision.allowed) {
+        res.status(403).json({
+          error: "Company search is outside this actor's authorization boundary",
+        });
+        return;
+      }
     }
     const parsedQuery = companySearchExtractQuerySchema.safeParse(req.query);
     if (!parsedQuery.success) {
@@ -7805,26 +7820,28 @@ export function issueRoutes(
       });
       return;
     }
-    const result = await getSearchService().extract(
-      companyId,
-      parsedQuery.data,
-    );
+    const result = authorization
+      ? await getSearchService().extract(companyId, parsedQuery.data, authorization)
+      : await getSearchService().extract(companyId, parsedQuery.data);
     res.json(result);
   });
 
   router.get("/companies/:companyId/search", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    const companyScopeDecision = await access.decide({
-      actor: req.actor,
-      action: "company_scope:read",
-      resource: { type: "company", companyId },
-    });
-    if (!companyScopeDecision.allowed) {
-      res.status(403).json({
-        error: "Company search is outside this actor's authorization boundary",
+    const authorization = await resourceQueryContext(db, companyId, req.actor);
+    if (!authorization) {
+      const companyScopeDecision = await access.decide({
+        actor: req.actor,
+        action: "company_scope:read",
+        resource: { type: "company", companyId },
       });
-      return;
+      if (!companyScopeDecision.allowed) {
+        res.status(403).json({
+          error: "Company search is outside this actor's authorization boundary",
+        });
+        return;
+      }
     }
     const parsedQuery = companySearchQuerySchema.safeParse(req.query);
     if (!parsedQuery.success) {
@@ -7856,7 +7873,9 @@ export function issueRoutes(
       });
       return;
     }
-    const result = await getSearchService().search(companyId, query);
+    const result = authorization
+      ? await getSearchService().search(companyId, query, authorization)
+      : await getSearchService().search(companyId, query);
     res.json(result);
   });
 
@@ -8091,6 +8110,7 @@ export function issueRoutes(
       afterId: req.query.afterId as string | undefined,
       sortDir: sortDir === "asc" || sortDir === "desc" ? sortDir : undefined,
       updatedSince: rawUpdatedSince,
+      resourceAuthorization: await resourceQueryContext(db, companyId, req.actor),
     };
     const requestKey = issueListRequestKey({
       req,
@@ -8274,6 +8294,8 @@ export function issueRoutes(
       return;
     }
 
+    const resourceAuthorization = await resourceQueryContext(db, companyId, req.actor);
+    if (resourceAuthorization) res.setHeader("Cache-Control", "no-store");
     const blockedCountFilters = {
       attention: "blocked",
       status: req.query.status as string | string[] | undefined,
@@ -8305,6 +8327,7 @@ export function issueRoutes(
       includeBlockedInboxAttention: true,
       hasPlanDocument,
       q: req.query.q as string | undefined,
+      resourceAuthorization,
     } as const;
 
     if (!(await actorCanReadCompanyScope(req, companyId))) {
@@ -8515,6 +8538,7 @@ export function issueRoutes(
     const currentExecutionWorkspacePromise = issue.executionWorkspaceId
       ? executionWorkspacesSvc.getById(issue.executionWorkspaceId)
       : Promise.resolve(null);
+    const authorization = await resourceQueryContext(db, issue.companyId, req.actor);
     const [
       { project, goal },
       ancestors,
@@ -8530,12 +8554,12 @@ export function issueRoutes(
       activeRecoveryAction,
     ] = await Promise.all([
       resolveIssueProjectAndGoal(issue),
-      svc.getAncestors(issue.id),
+      svc.getAncestors(issue.id, authorization),
       svc.getCommentCursor(issue.id),
       wakeCommentId ? svc.getComment(wakeCommentId) : null,
-      svc.getRelationSummaries(issue.id),
+      svc.getRelationSummaries(issue.id, authorization),
       svc
-        .listBlockerAttention(issue.companyId, [issue])
+        .listBlockerAttention(issue.companyId, [issue], db, authorization)
         .then((map) => map.get(issue.id) ?? null),
       svc
         .listReviewAttention(issue.companyId, [issue])
@@ -8545,6 +8569,7 @@ export function issueRoutes(
       documentsSvc.getIssueDocumentByKey(
         issue.id,
         ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY,
+        { companyId: issue.companyId, authorization },
       ),
       currentExecutionWorkspacePromise,
       recoveryActionsSvc.getActiveForIssue(issue.companyId, issue.id),
@@ -8843,6 +8868,7 @@ export function issueRoutes(
       req.actor.type === "board" && req.actor.userId
         ? timing.time("inbox", () => svc.getActiveInboxArchiveFields(issue, req.actor.userId!))
         : Promise.resolve({});
+    const authorization = await resourceQueryContext(db, issue.companyId, req.actor);
     const [
       { project, goal },
       ancestors,
@@ -8862,17 +8888,17 @@ export function issueRoutes(
       workProducts,
     ] = await Promise.all([
       timing.time("project_goal", () => resolveIssueProjectAndGoal(issue)),
-      timing.time("ancestors", () => svc.getAncestors(issue.id)),
-      timing.time("mentions", () => svc.findMentionedProjectIds(issue.id, { includeCommentBodies: false })),
-      timing.time("documents", () => documentsSvc.getIssueDocumentPayload(issue)),
-      timing.time("relations", () => svc.getRelationSummaries(issue.id)),
+      timing.time("ancestors", () => svc.getAncestors(issue.id, authorization)),
+      timing.time("mentions", () => svc.findMentionedProjectIds(issue.id, { includeCommentBodies: false, authorization })),
+      timing.time("documents", () => documentsSvc.getIssueDocumentPayload(issue, { companyId: issue.companyId, authorization })),
+      timing.time("relations", () => svc.getRelationSummaries(issue.id, authorization)),
       timing.time("blockers", () => svc
-        .listBlockerAttention(issue.companyId, [issue])
+        .listBlockerAttention(issue.companyId, [issue], db, authorization)
         .then((map) => map.get(issue.id) ?? null)),
       timing.time("review", () => svc
         .listReviewAttention(issue.companyId, [issue])
         .then((map) => map.get(issue.id) ?? null)),
-      timing.time("references", () => issueReferencesSvc.listIssueReferenceSummary(issue.id)),
+      timing.time("references", () => authorizedReferenceSummary(req, issue)),
       timing.time("handoff", () => listSuccessfulRunHandoffStates(db, issue.companyId, [issue.id])),
       timing.time("retry", () => svc.getCurrentScheduledRetry(issue.id)),
       timing.time("recovery", () => recoveryActionsSvc.getActiveForIssue(issue.companyId, issue.id)),
@@ -8882,7 +8908,7 @@ export function issueRoutes(
       timing.time("workspace", () => issue.executionWorkspaceId
         ? executionWorkspacesSvc.getById(issue.executionWorkspaceId)
         : Promise.resolve(null)),
-      timing.time("work_products", () => workProductsSvc.listForIssue(issue.id)),
+      timing.time("work_products", () => authorization ? Promise.resolve([]) : workProductsSvc.listForIssue(issue.id)),
     ]);
     const [recoveryActionsByRelationIssue, revalidatedActiveRecoveryAction, mentionedProjects] = await Promise.all([
       timing.time("relation_recovery", () => relationRecoveryActionMap(recoveryActionsSvc, issue.companyId, relations)),
@@ -8908,9 +8934,9 @@ export function issueRoutes(
       goalId: goal?.id ?? issue.goalId,
       ancestors,
       ...(blockerAttention ? { blockerAttention } : {}),
-      ...(reviewAttention ? { reviewAttention } : {}),
+      ...(!authorization && reviewAttention ? { reviewAttention } : {}),
       successfulRunHandoff: successfulRunHandoffStates.get(issue.id) ?? null,
-      executionBlocker,
+      executionBlocker: authorization ? null : executionBlocker,
       scheduledRetry,
       activeRecoveryAction: revalidatedActiveRecoveryAction,
       blockedBy: relationsWithRecoveryActions.blockedBy,
@@ -8927,7 +8953,7 @@ export function issueRoutes(
         currentExecutionWorkspace,
       ),
       workProducts,
-      linkedCases,
+      linkedCases: authorization ? [] : linkedCases,
       externalChannelBinding,
     });
   });
@@ -9795,8 +9821,11 @@ export function issueRoutes(
     );
     if (!issue) return;
     if (!(await assertIssueReadAllowed(req, res, issue))) return;
+    const authorization = await resourceQueryContext(db, issue.companyId, req.actor);
     const docs = await documentsSvc.listIssueDocuments(issue.id, {
       includeSystem: req.query.includeSystem === "true",
+      companyId: issue.companyId,
+      authorization,
     });
     res.json(docs);
   });
@@ -9823,9 +9852,11 @@ export function issueRoutes(
       });
       return;
     }
+    const authorization = await resourceQueryContext(db, issue.companyId, req.actor);
     const doc = await documentsSvc.getIssueDocumentByKey(
       issue.id,
       keyParsed.data,
+      { companyId: issue.companyId, authorization },
     );
     if (!doc) {
       res.status(404).json({ error: "Document not found" });
@@ -9917,7 +9948,7 @@ export function issueRoutes(
 
       const { actor, annotationActor } = annotationActorInput(req);
       const referenceSummaryBefore =
-        await issueReferencesSvc.listIssueReferenceSummary(issue.id);
+        await authorizedReferenceSummary(req, issue);
       const thread = await documentAnnotationsSvc.createThread(
         issue.id,
         keyParsed.data,
@@ -9928,7 +9959,7 @@ export function issueRoutes(
       if (firstComment)
         await issueReferencesSvc.syncAnnotationComment(firstComment.id);
       const referenceSummaryAfter =
-        await issueReferencesSvc.listIssueReferenceSummary(issue.id);
+        await authorizedReferenceSummary(req, issue);
       const referenceDiff = issueReferencesSvc.diffIssueReferenceSummary(
         referenceSummaryBefore,
         referenceSummaryAfter,
@@ -10035,7 +10066,7 @@ export function issueRoutes(
 
       const { actor, annotationActor } = annotationActorInput(req);
       const referenceSummaryBefore =
-        await issueReferencesSvc.listIssueReferenceSummary(issue.id);
+        await authorizedReferenceSummary(req, issue);
       const comment = await documentAnnotationsSvc.addComment(
         issue.id,
         keyParsed.data,
@@ -10045,7 +10076,7 @@ export function issueRoutes(
       );
       await issueReferencesSvc.syncAnnotationComment(comment.id);
       const referenceSummaryAfter =
-        await issueReferencesSvc.listIssueReferenceSummary(issue.id);
+        await authorizedReferenceSummary(req, issue);
       const referenceDiff = issueReferencesSvc.diffIssueReferenceSummary(
         referenceSummaryBefore,
         referenceSummaryAfter,
@@ -10176,7 +10207,7 @@ export function issueRoutes(
       const actor = getActorInfo(req);
       const sourceTrust = await sourceTrustForActorWrite(issue, actor);
       const referenceSummaryBefore =
-        await issueReferencesSvc.listIssueReferenceSummary(issue.id);
+        await authorizedReferenceSummary(req, issue);
       const result = await documentsSvc.upsertIssueDocument({
         issueId: issue.id,
         key: keyParsed.data,
@@ -10200,7 +10231,7 @@ export function issueRoutes(
       await issueReferencesSvc.syncDocument(doc.id);
       await externalObjectsSvc.syncDocumentSafely(doc.id);
       const referenceSummaryAfter =
-        await issueReferencesSvc.listIssueReferenceSummary(issue.id);
+        await authorizedReferenceSummary(req, issue);
       const referenceDiff = issueReferencesSvc.diffIssueReferenceSummary(
         referenceSummaryBefore,
         referenceSummaryAfter,
@@ -10486,7 +10517,7 @@ export function issueRoutes(
 
       const actor = getActorInfo(req);
       const referenceSummaryBefore =
-        await issueReferencesSvc.listIssueReferenceSummary(issue.id);
+        await authorizedReferenceSummary(req, issue);
       const result = await documentsSvc.restoreIssueDocumentRevision({
         issueId: issue.id,
         key: keyParsed.data,
@@ -10496,7 +10527,7 @@ export function issueRoutes(
       });
       await issueReferencesSvc.syncDocument(result.document.id);
       const referenceSummaryAfter =
-        await issueReferencesSvc.listIssueReferenceSummary(issue.id);
+        await authorizedReferenceSummary(req, issue);
       await externalObjectsSvc.syncDocumentSafely(result.document.id);
       const referenceDiff = issueReferencesSvc.diffIssueReferenceSummary(
         referenceSummaryBefore,
@@ -10632,7 +10663,7 @@ export function issueRoutes(
       return;
     }
     const referenceSummaryBefore =
-      await issueReferencesSvc.listIssueReferenceSummary(issue.id);
+      await authorizedReferenceSummary(req, issue);
     const removed = await documentsSvc.deleteIssueDocument(
       issue.id,
       keyParsed.data,
@@ -10643,7 +10674,7 @@ export function issueRoutes(
     }
     await issueReferencesSvc.deleteDocumentSource(removed.id);
     const referenceSummaryAfter =
-      await issueReferencesSvc.listIssueReferenceSummary(issue.id);
+      await authorizedReferenceSummary(req, issue);
     if (removed) await externalObjectsSvc.syncDocumentSafely(removed.id);
     const referenceDiff = issueReferencesSvc.diffIssueReferenceSummary(
       referenceSummaryBefore,
@@ -11863,6 +11894,8 @@ export function issueRoutes(
         onDeduplicated: (reason: "idempotency_key" | "recent_open_title") => {
           deduplicationReason = reason;
         },
+        placementActor: req.actor,
+        publishPlacement: rawCreateBody.publishPlacement === true,
       };
       let issue: Awaited<ReturnType<typeof svc.create>>;
       try {
@@ -11881,7 +11914,7 @@ export function issueRoutes(
       }
       if (deduplicationReason) {
         const referenceSummary =
-          await issueReferencesSvc.listIssueReferenceSummary(issue.id);
+          await authorizedReferenceSummary(req, issue);
         res.status(200).json({
           ...issue,
           deduplicated: true,
@@ -11897,7 +11930,7 @@ export function issueRoutes(
       await issueReferencesSvc.syncIssue(issue.id);
       await externalObjectsSvc.syncIssueSafely(issue.id);
       const referenceSummary =
-        await issueReferencesSvc.listIssueReferenceSummary(issue.id);
+        await authorizedReferenceSummary(req, issue);
       const referenceDiff = issueReferencesSvc.diffIssueReferenceSummary(
         issueReferencesSvc.emptySummary(),
         referenceSummary,
@@ -12882,9 +12915,13 @@ export function issueRoutes(
         );
       const titleOrDescriptionChanged =
         req.body.title !== undefined || req.body.description !== undefined;
+      const relationAuthorization = await resourceQueryContext(db, existing.companyId, req.actor);
       const existingRelations = Array.isArray(req.body.blockedByIssueIds)
         ? await svc.getRelationSummaries(existing.id)
         : null;
+      const readableExistingRelations = existingRelations && relationAuthorization
+        ? await svc.getRelationSummaries(existing.id, relationAuthorization)
+        : existingRelations;
       const {
         comment: commentBody,
         commentClientRequestId,
@@ -12897,6 +12934,8 @@ export function issueRoutes(
         deferWakeForGoal,
         hiddenAt: hiddenAtRaw,
         onBehalfOfUserId: _requestedOnBehalfOfUserId,
+        publishPlacement,
+        placementActor: _clientPlacementActor,
         ...updateFields
       } = req.body;
       if (existing.conversationAgentId && req.actor.type === "board" && commentBody) {
@@ -13075,7 +13114,7 @@ export function issueRoutes(
             })) ||
           shouldResumeInProgressScheduledRetry);
       const updateReferenceSummaryBefore = titleOrDescriptionChanged
-        ? await issueReferencesSvc.listIssueReferenceSummary(existing.id)
+        ? await authorizedReferenceSummary(req, existing)
         : null;
       const hasUnresolvedFirstClassBlockers =
         isBlocked && effectiveMoveToTodoRequested
@@ -13591,6 +13630,8 @@ export function issueRoutes(
         actorRunId: actor.agentId ? actor.runId : null,
         actorRunStopId: actor.agentId && interruptedRunId === actor.runId ? issueMutationStopId : null,
         actorUserId: actor.actorType === "user" ? actor.actorId : null,
+        placementActor: req.actor,
+        publishPlacement: publishPlacement === true,
       };
       const shouldCollectCompletionPublication =
         actor.actorType === "user" &&
@@ -13929,7 +13970,7 @@ export function issueRoutes(
         await externalObjectsSvc.syncIssueSafely(issue.id);
       }
       const updateReferenceSummaryAfter = titleOrDescriptionChanged
-        ? await issueReferencesSvc.listIssueReferenceSummary(issue.id)
+        ? await authorizedReferenceSummary(req, issue)
         : null;
       const updateReferenceDiff =
         updateReferenceSummaryBefore && updateReferenceSummaryAfter
@@ -13951,7 +13992,7 @@ export function issueRoutes(
         ReturnType<typeof svc.getRelationSummaries>
       > | null = null;
       if (issue && Array.isArray(req.body.blockedByIssueIds)) {
-        updatedRelations = await svc.getRelationSummaries(issue.id);
+        updatedRelations = await svc.getRelationSummaries(issue.id, relationAuthorization);
         issueResponse = {
           ...issue,
           blockedByIssueIds:
@@ -14141,7 +14182,7 @@ export function issueRoutes(
 
       if (Array.isArray(req.body.blockedByIssueIds)) {
         const previousBlockedByIds = new Set(
-          (existingRelations?.blockedBy ?? []).map((relation) => relation.id),
+          (readableExistingRelations?.blockedBy ?? []).map((relation) => relation.id),
         );
         const nextBlockedByIds = new Set(
           req.body.blockedByIssueIds as string[],
@@ -14153,7 +14194,7 @@ export function issueRoutes(
           (candidate) => !nextBlockedByIds.has(candidate),
         );
         const nextBlockedByRelations = updatedRelations?.blockedBy ?? [];
-        const previousBlockedByRelations = existingRelations?.blockedBy ?? [];
+        const previousBlockedByRelations = readableExistingRelations?.blockedBy ?? [];
         if (
           addedBlockedByIssueIds.length > 0 ||
           removedBlockedByIssueIds.length > 0
@@ -14366,7 +14407,7 @@ export function issueRoutes(
       if (commentBody) {
         const commentReferenceSummaryBefore =
           updateReferenceSummaryAfter ??
-          (await issueReferencesSvc.listIssueReferenceSummary(issue.id));
+          (await authorizedReferenceSummary(req, issue));
         comment ??= await svc.addComment(
           id,
           commentBody,
@@ -14429,7 +14470,7 @@ export function issueRoutes(
           }
         }
         const commentReferenceSummaryAfter =
-          await issueReferencesSvc.listIssueReferenceSummary(issue.id);
+          await authorizedReferenceSummary(req, issue);
         const commentReferenceDiff =
           issueReferencesSvc.diffIssueReferenceSummary(
             commentReferenceSummaryBefore,
@@ -17316,6 +17357,7 @@ export function issueRoutes(
         title: `Chat with ${agent.name}`, assigneeAgentId: agent.id,
         conversationAgentId: agent.id, conversationUserId: req.actor.userId,
         conversationState: "waiting", status: "in_review", createdByUserId: req.actor.userId,
+        placementActor: req.actor,
       });
       await logActivity(db, { companyId, actorType: "user", actorId: req.actor.userId,
         action: "issue.conversation_opened", entityType: "issue", entityId: issue.id,
@@ -17572,7 +17614,7 @@ export function issueRoutes(
         typeof buildExecutionStageWakeup
       > | null = null;
       const commentReferenceSummaryBefore =
-        await issueReferencesSvc.listIssueReferenceSummary(issue.id);
+        await authorizedReferenceSummary(req, issue);
 
       let scheduledRetrySupersededByComment = false;
       let cancelledScheduledRetryRunId: string | null = null;
@@ -17925,7 +17967,7 @@ export function issueRoutes(
         }
       }
       const commentReferenceSummaryAfter =
-        await issueReferencesSvc.listIssueReferenceSummary(currentIssue.id);
+        await authorizedReferenceSummary(req, currentIssue);
       const commentReferenceDiff = issueReferencesSvc.diffIssueReferenceSummary(
         commentReferenceSummaryBefore,
         commentReferenceSummaryAfter,

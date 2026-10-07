@@ -65,6 +65,7 @@ import { isSecretProviderClientError } from "../secrets/types.js";
 import { authorizationDeniedDetails, authorizationService } from "./authorization.js";
 import { findActiveServerAdapter } from "../adapters/index.js";
 import { logActivity } from "./activity-log.js";
+import { restrictedSecretAccessService } from "./restricted-secret-access.js";
 // Only a `local_encrypted` secret can hold a literal directory path, so only a
 // `local_encrypted` secret can ever name a Codex account-home directory. A
 // create or a rotate that writes a new `local_encrypted` value runs inside
@@ -1366,6 +1367,15 @@ export function secretService(db: Db | DbTransaction) {
         code: "secret_scope_invalid",
       });
     }
+    const restrictedAccess = restrictedSecretAccessService(db);
+    if (!await restrictedAccess.allowed(companyId, secretId, accessContext)
+      || (bindingContext && !await restrictedAccess.allowed(companyId, secretId, {
+        ...accessContext,
+        consumerType: bindingContext.consumerType,
+        consumerId: bindingContext.consumerId,
+      }))) {
+      throw notFound("Secret not found");
+    }
     const resolvedVersion = version === "latest" ? secret.latestVersion : version;
     const providerId = secret.provider as SecretProvider;
     const configPath = accessContext?.configPath ?? null;
@@ -1692,7 +1702,7 @@ export function secretService(db: Db | DbTransaction) {
       consumerType: "agent_api",
       consumerId: context.agentId,
       configPath: context.configPath,
-      responsibleUserId: context.responsibleUserId ?? null,
+      responsibleUserId: typeof runContext.responsibleUserId === "string" ? runContext.responsibleUserId : context.responsibleUserId ?? null,
       actorType: "agent",
       actorId: context.agentId,
       actorSource: context.actorSource,
@@ -1822,7 +1832,14 @@ export function secretService(db: Db | DbTransaction) {
         eq(companySecrets.status, "active"),
         inArray(companySecrets.id, [...new Set(bindings.map((binding) => binding.secretId))]),
       ));
-    const secretsById = new Map(secrets.map((secret) => [secret.id, secret]));
+    const visibleSecrets = [];
+    for (const secret of secrets) {
+      if (await restrictedSecretAccessService(db).allowed(companyId, secret.id, {
+        actorType: "agent", actorId: context.agentId,
+        responsibleUserId: typeof runContext.responsibleUserId === "string" ? runContext.responsibleUserId : context.responsibleUserId ?? null,
+      })) visibleSecrets.push(secret);
+    }
+    const secretsById = new Map(visibleSecrets.map((secret) => [secret.id, secret]));
     const bindingsBySecret = new Map<string, typeof bindings>();
     for (const binding of bindings) {
       const current = bindingsBySecret.get(binding.secretId) ?? [];
@@ -4910,11 +4927,12 @@ export function secretService(db: Db | DbTransaction) {
      * while secrets are company-scoped, so an environment can legitimately
      * reference a secret a given company's picker cannot list; this gives
      * instance-level readers enough metadata to present such refs honestly.
-     * Returns names across companies — callers must sit behind an
-     * instance-level authorization gate. Never returns secret values.
+     * Callers must sit behind an instance-level authorization gate. Restricted
+     * names additionally require current group membership. Never returns values.
      */
     describeSecretRefs: async (
       refs: Array<{ secretId: string; configPath: string }>,
+      context?: SecretConsumerContext,
     ): Promise<Array<{
       configPath: string;
       secretId: string;
@@ -4929,8 +4947,12 @@ export function secretService(db: Db | DbTransaction) {
         .select()
         .from(companySecrets)
         .where(inArray(companySecrets.id, secretIds));
-      const secretsById = new Map(secretRows.map((row) => [row.id, row]));
-      const companyIds = [...new Set(secretRows.map((row) => row.companyId))];
+      const visibleRows = [];
+      for (const row of secretRows) {
+        if (await restrictedSecretAccessService(db).allowed(row.companyId, row.id, context)) visibleRows.push(row);
+      }
+      const secretsById = new Map(visibleRows.map((row) => [row.id, row]));
+      const companyIds = [...new Set(visibleRows.map((row) => row.companyId))];
       const companyRows = companyIds.length > 0
         ? await db.select().from(companies).where(inArray(companies.id, companyIds))
         : [];

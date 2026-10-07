@@ -6,6 +6,7 @@ import { sidebarBadgeService } from "../services/sidebar-badges.js";
 import { accessService } from "../services/access.js";
 import { collapseDuplicatePendingHumanJoinRequests } from "../lib/join-request-dedupe.js";
 import { assertCompanyAccess } from "./authz.js";
+import { resourceQueryContext } from "../services/resource-query-context.js";
 
 function buildDismissedAtByKey(
   dismissals: Array<{ itemKey: string; kind: string; dismissedAt: Date | string; snoozedUntil: Date | string | null }>,
@@ -77,12 +78,15 @@ export function sidebarBadgeRoutes(db: Db) {
         : new Map<string, number>();
 
     // Company health alerts belong in All, not the personal inbox badge.
+    const authorization = await resourceQueryContext(db, companyId, req.actor);
+    if (authorization) res.setHeader("Cache-Control", "no-store");
     const badges = await svc.get(companyId, {
       currentUserId: req.actor.type === "board"
         ? req.actor.userId ?? null
         : req.actor.onBehalfOfUserId ?? null,
       dismissals: dismissedAtByKey,
       joinRequests: visibleJoinRequests,
+      ...(authorization ? { authorization } : {}),
     });
 
     res.json(badges);

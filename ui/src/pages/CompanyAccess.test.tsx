@@ -474,7 +474,7 @@ describe("CompanyAccess", () => {
     });
   });
 
-  it("shows a read-only unavailable fallback for legacy access deep links", async () => {
+  it("redirects legacy access deep links to the built-in editor without an extension", async () => {
     const root = createRoot(container);
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
@@ -489,10 +489,7 @@ describe("CompanyAccess", () => {
     });
     await flushReact();
 
-    expect(container.textContent).toContain("Advanced Permissions");
-    expect(container.textContent).toContain("Advanced permissions unavailable");
-    expect(container.textContent).toContain("Open Members");
-    expect(container.textContent).toContain("Open Invites");
+    expect(container.textContent).toContain("/company/settings/permissions");
 
     await act(async () => {
       root.unmount();

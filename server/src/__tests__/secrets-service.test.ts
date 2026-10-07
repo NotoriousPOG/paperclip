@@ -1,3 +1,7 @@
+import express from "express";
+import request from "supertest";
+import { secretRoutes } from "../routes/secrets.js";
+import { errorHandler } from "../middleware/error-handler.js";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
@@ -8,6 +12,9 @@ import type { MockInstance } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
 import { resolveCodexAuthCacheDir, withAccountHomeSecretMutationLock } from "@paperclipai/adapter-codex-local/server";
 import {
+  accessGroups,
+  accessGroupMembers,
+  resourceAccessScopes,
   activityLog,
   agents,
   companies,
@@ -168,6 +175,7 @@ describeEmbeddedPostgres("secretService", () => {
     await db.delete(companySecrets);
     await db.delete(userSecretDefinitions);
     await db.delete(companySecretProviderConfigs);
+    await db.delete(accessGroups);
     await db.delete(companyMemberships);
     await db.delete(heartbeatRuns);
     await db.delete(agents);
@@ -249,6 +257,58 @@ describeEmbeddedPostgres("secretService", () => {
     });
     return { agentId, heartbeatRunId };
   }
+
+  it("enforces live restricted secret membership before provider access", async () => {
+    const companyId = await seedCompany("Restricted secrets");
+    const svc = secretService(db);
+    const secret = await svc.create(companyId, {
+      name: `restricted-${randomUUID()}`, provider: "local_encrypted", value: "restricted-test-value",
+    });
+    const userId = randomUUID();
+    const outsiderId = randomUUID();
+    const [member] = await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: userId, status: "active" }).returning();
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: outsiderId, status: "active" });
+    const [group] = await db.insert(accessGroups).values({ companyId, name: "Restricted research" }).returning();
+    await db.insert(accessGroupMembers).values({ companyId, groupId: group.id, membershipId: member.id, role: "viewer" });
+    await db.insert(resourceAccessScopes).values({ companyId, groupId: group.id, secretId: secret.id });
+    const provider = vi.spyOn(localEncryptedProvider, "resolveVersion");
+    const context = { consumerType: "system" as const, consumerId: "test", actorType: "user" as const, actorId: userId };
+    for (const accessContext of [undefined, { ...context, actorId: outsiderId }, { ...context, actorType: "system" as const }]) {
+      await expect(svc.resolveSecretValue(companyId, secret.id, "latest", { accessContext })).rejects.toMatchObject({ status: 404 });
+    }
+    expect(provider).not.toHaveBeenCalled();
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      req.actor = { type: "board", userId: outsiderId, source: "session", companyIds: [companyId], memberships: [{ companyId, status: "active", membershipRole: "admin" }] };
+      next();
+    });
+    app.use("/api", secretRoutes(db));
+    app.use(errorHandler);
+    const catalog = await request(app).get(`/api/companies/${companyId}/secrets`);
+    expect(catalog.status).toBe(200);
+    expect(catalog.body).toEqual([]);
+    // Reproducible route mutations exercise encoding, query pollution, HEAD, and all exposed ID actions.
+    let seed = 0x51ec7;
+    for (let index = 0; index < 32; index++) {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      const id = seed & 1 ? secret.id : secret.id.replaceAll("-", "%2D");
+      const suffix = seed & 2 ? "?companyId=other&groupId=other" : "";
+      const path = `/api/secrets/${id}`;
+      const response = index % 4 === 0 ? await request(app).get(`${path}/usage${suffix}`)
+        : index % 4 === 1 ? await request(app).head(`${path}/access-events${suffix}`)
+        : index % 4 === 2 ? await request(app).patch(`${path}${suffix}`).send({ name: "Unauthorized" })
+        : await request(app).delete(`${path}${suffix}`);
+      expect(response.status).toBe(404);
+      expect(JSON.stringify(response.body)).not.toContain(secret.name);
+    }
+    expect((await svc.getById(secret.id))?.name).toBe(secret.name);
+    await expect(svc.resolveSecretValue(companyId, secret.id, "latest", { accessContext: context })).resolves.toBe("restricted-test-value");
+    expect(provider).toHaveBeenCalledTimes(1);
+    await db.delete(accessGroupMembers).where(eq(accessGroupMembers.membershipId, member.id));
+    await expect(svc.resolveSecretValue(companyId, secret.id, "latest", { accessContext: context })).rejects.toMatchObject({ status: 404 });
+    expect(provider).toHaveBeenCalledTimes(1);
+  });
 
   it("rejects cross-company secret references during env normalization", async () => {
     const companyA = await seedCompany("A");

@@ -1,3 +1,4 @@
+import { authorizedResourcePredicate, type AuthorizedResourceQuery } from "./authorized-resource-query.js";
 import { and, asc, desc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -359,6 +360,7 @@ async function attachListMetrics(
   db: Db,
   companyId: string,
   rows: ProjectWithGoals[],
+  authorization?: Omit<AuthorizedResourceQuery, "companyId" | "resource">,
 ): Promise<ProjectWithGoals[]> {
   if (rows.length === 0) return rows;
 
@@ -371,7 +373,7 @@ async function attachListMetrics(
         count: sql<number>`count(*)::int`,
       })
       .from(issues)
-      .where(and(eq(issues.companyId, companyId), inArray(issues.projectId, projectIds), isNull(issues.conversationAgentId)))
+      .where(and(eq(issues.companyId, companyId), inArray(issues.projectId, projectIds), isNull(issues.conversationAgentId), authorization ? authorizedResourcePredicate({ ...authorization, companyId, resource: { type: "issue", id: issues.id, companyId: issues.companyId } }) : undefined))
       .groupBy(issues.projectId),
     db
       .select({
@@ -625,7 +627,7 @@ export function projectService(db: Db, options: { captureWorkspaceUpdates?: bool
 
   return {
     // Project discovery never reads workspace JSON, goals, metrics, or full descriptions.
-    listSummaries: async (companyId: string, opts: { limit: number; cursor?: string; includeArchived: boolean; candidateIds: string[] | null }): Promise<ProjectDiscoverySummary[]> => {
+    listSummaries: async (companyId: string, opts: { limit: number; cursor?: string; includeArchived: boolean; candidateIds: string[] | null; authorization?: Omit<AuthorizedResourceQuery, "companyId" | "resource"> }): Promise<ProjectDiscoverySummary[]> => {
       return db.select({
         id: projects.id,
         name: sql<string>`left(${projects.name}, 500)`,
@@ -642,10 +644,14 @@ export function projectService(db: Db, options: { captureWorkspaceUpdates?: bool
           // Keep these candidates for the authoritative per-project decision.
           sql`${projects.executionWorkspacePolicy}->'authorizationPolicy' is not null`,
         ),
+        opts.authorization ? authorizedResourcePredicate({
+          ...opts.authorization, companyId,
+          resource: { type: "project", id: projects.id, companyId: projects.companyId },
+        }) : undefined,
       )).orderBy(asc(projects.id)).limit(opts.limit);
     },
 
-    list: async (companyId: string, opts: { includeArchived?: boolean } = {}): Promise<ProjectWithGoals[]> => {
+    list: async (companyId: string, opts: { includeArchived?: boolean; authorization?: Omit<AuthorizedResourceQuery, "companyId" | "resource"> } = {}): Promise<ProjectWithGoals[]> => {
       // NOTE: this service default is intentionally the inverse of the HTTP route default.
       // The route (`GET /companies/:companyId/projects`) defaults `includeArchived` to `false`
       // (active-only) for its callers, but the service defaults to `true` so that existing
@@ -655,10 +661,13 @@ export function projectService(db: Db, options: { captureWorkspaceUpdates?: bool
       const where = includeArchived
         ? eq(projects.companyId, companyId)
         : and(eq(projects.companyId, companyId), isNull(projects.archivedAt));
-      const rows = await db.select().from(projects).where(where);
+      const rows = await db.select().from(projects).where(and(where, opts.authorization ? authorizedResourcePredicate({
+        ...opts.authorization, companyId,
+        resource: { type: "project", id: projects.id, companyId: projects.companyId },
+      }) : undefined));
       const withGoals = await attachGoals(db, rows);
       const withWorkspaces = await attachWorkspaces(db, withGoals);
-      return attachListMetrics(db, companyId, withWorkspaces);
+      return attachListMetrics(db, companyId, withWorkspaces, opts.authorization);
     },
 
     listByIds: async (companyId: string, ids: string[]): Promise<ProjectWithGoals[]> => {

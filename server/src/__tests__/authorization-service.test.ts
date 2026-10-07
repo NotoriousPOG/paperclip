@@ -2771,4 +2771,97 @@ describeEmbeddedPostgres("authorization service", () => {
         .resolves.toMatchObject({ allowed: false, reason: "deny_scope" });
     }
   });
+
+  it("applies resource policies before admin bypasses and preserves legacy decisions when omitted", async () => {
+    const company = await createCompany(db, "ScopedAdmin");
+    const project = await createProject(db, company.id, "Protected");
+    const authz = authorizationService(db);
+    const input = {
+      actor: { type: "board" as const, source: "session" as const, userId: "admin", isInstanceAdmin: true },
+      action: "project:read" as const,
+      resource: { type: "project" as const, companyId: company.id, projectId: project.id },
+    };
+    await expect(authz.decide(input)).resolves.toMatchObject({ allowed: true });
+    const resourcePolicy = {
+      version: 1, companyId: company.id, scopeId: randomUUID(), revision: 1,
+      resource: { type: "project", id: project.id }, accessMode: "restricted", classification: "restricted",
+      companyBaseline: { user: [], agent: [] }, grants: [],
+    };
+    await expect(authz.decide({ ...input, resourcePolicy })).resolves.toMatchObject({
+      allowed: false, reason: "deny_resource_policy", resourcePolicyDenial: "missing_grant",
+    });
+    // An explicitly supplied but unavailable snapshot is not legacy omission.
+    await expect(authz.decide({ ...input, resourcePolicy: undefined })).resolves.toMatchObject({
+      allowed: false, reason: "deny_resource_policy", resourcePolicyDenial: "invalid_policy",
+    });
+    await expect(authz.decide({ ...input, resourcePolicy: {
+      ...resourcePolicy,
+      grants: [{ principalType: "user", principalId: "admin", actions: ["project:read"], expiresAt: null, revokedAt: null }],
+    } })).resolves.toMatchObject({ allowed: false, reason: "deny_missing_membership" });
+  });
+
+  it("never uses a resource grant to override a denied company membership", async () => {
+    const company = await createCompany(db, "ScopedMembership");
+    const project = await createProject(db, company.id, "Protected");
+    const userId = `user-${randomUUID()}`;
+    const resourcePolicy = {
+      version: 1, companyId: company.id, scopeId: randomUUID(), revision: 7,
+      resource: { type: "project", id: project.id }, accessMode: "restricted", classification: "restricted",
+      companyBaseline: { user: [], agent: [] },
+      grants: [{ principalType: "user", principalId: userId, actions: ["project:read"], expiresAt: null, revokedAt: null }],
+    };
+    const input = {
+      actor: { type: "board" as const, source: "session" as const, userId },
+      action: "project:read" as const,
+      resource: { type: "project" as const, companyId: company.id, projectId: project.id },
+      resourcePolicy,
+    };
+    await expect(authorizationService(db).decide(input)).resolves.toMatchObject({ allowed: false });
+    await db.insert(companyMemberships).values({ companyId: company.id, principalType: "user", principalId: userId, status: "active", membershipRole: "viewer" });
+    await expect(authorizationService(db).decide(input)).resolves.toMatchObject({ allowed: true, resourcePolicyRevision: 7 });
+  });
+
+  it("enforces current responsible-user membership even with a stale actor snapshot and shadow mode", async () => {
+    const company = await createCompany(db, "ScopedLiveMembership");
+    const agent = await createAgent(db, company.id);
+    const userId = await createUser(db);
+    const issue = await createIssue(db, company.id, { assigneeAgentId: agent.id });
+    const scopeId = randomUUID();
+    const runId = randomUUID();
+    await db.insert(companyMemberships).values({ companyId: company.id, principalType: "user", principalId: userId, status: "active", membershipRole: "operator" });
+    const input = {
+      actor: {
+        type: "agent" as const, source: "agent_jwt" as const, agentId: agent.id, companyId: company.id,
+        runId, onBehalfOfUserId: userId,
+        onBehalfOfMemberships: [{ companyId: company.id, membershipRole: "operator", status: "active" }],
+      },
+      action: "issue:read" as const,
+      resource: { type: "issue" as const, companyId: company.id, issueId: issue.id, assigneeAgentId: agent.id },
+      resourcePolicy: {
+        version: 1, companyId: company.id, scopeId, revision: 1,
+        resource: { type: "issue", id: issue.id }, accessMode: "restricted", classification: "restricted",
+        companyBaseline: { user: [], agent: [] },
+        grants: [
+          { principalType: "user", principalId: userId, actions: ["issue:read"], expiresAt: null, revokedAt: null },
+          { principalType: "agent", principalId: agent.id, actions: ["issue:read"], expiresAt: null, revokedAt: null },
+        ],
+      },
+      executionGrant: {
+        version: 1, companyId: company.id, agentId: agent.id, runId, responsibleUserId: userId, issueId: issue.id,
+        scopes: [{ scopeId, revision: 1 }], actions: ["issue:read"], issuedAt: Date.now() - 1_000,
+        expiresAt: Date.now() + 60_000, revokedAt: null,
+      },
+    };
+    const previous = process.env.PAPERCLIP_RESPONSIBLE_USER_AUTHZ_MODE;
+    process.env.PAPERCLIP_RESPONSIBLE_USER_AUTHZ_MODE = "shadow";
+    try {
+      const authz = authorizationService(db);
+      await expect(authz.decide(input)).resolves.toMatchObject({ allowed: true });
+      await db.delete(companyMemberships).where(eq(companyMemberships.principalId, userId));
+      await expect(authz.decide(input)).resolves.toMatchObject({ allowed: false, code: "RESPONSIBLE_USER_UNAVAILABLE" });
+    } finally {
+      if (previous === undefined) delete process.env.PAPERCLIP_RESPONSIBLE_USER_AUTHZ_MODE;
+      else process.env.PAPERCLIP_RESPONSIBLE_USER_AUTHZ_MODE = previous;
+    }
+  });
 });

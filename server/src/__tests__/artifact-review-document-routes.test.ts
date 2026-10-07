@@ -2,6 +2,7 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { StorageService } from "../storage/types.js";
+import { unscopedQueryDb } from "./helpers/unscoped-query-db.js";
 
 const ISSUE_ID = "11111111-1111-4111-8111-111111111111";
 const WORK_PRODUCT_ID = "22222222-2222-4222-8222-222222222222";
@@ -153,7 +154,7 @@ async function createApp(options?: { companyIds?: string[] }) {
     };
     next();
   });
-  app.use("/api", issueRoutes({} as any, createStorageService()));
+  app.use("/api", issueRoutes(unscopedQueryDb() as any, createStorageService()));
   app.use(errorHandler);
   return app;
 }

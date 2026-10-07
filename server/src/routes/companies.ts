@@ -1,3 +1,5 @@
+import { resourceScopeAuthorizationService } from "../services/resource-scope-authorization.js";
+import { resourceQueryContext } from "../services/resource-query-context.js";
 import { createHash, randomUUID } from "node:crypto";
 import express, { Router, type NextFunction, type Request, type Response } from "express";
 import multer from "multer";
@@ -363,6 +365,9 @@ export function companyRoutes(db: Db, storage?: StorageService, options?: Compan
 
   async function assertSameCompanyCeoAgentOrBoard(req: Request, companyId: string, capability: string) {
     assertCompanyAccess(req, companyId);
+    const scope = await resourceScopeAuthorizationService(db).decide({ actor: req.actor,
+      action: "company_scope:read", resource: { type: "company", companyId } });
+    if (!scope.allowed) throw forbidden("Company operation is outside the current access scope");
     if (req.actor.type === "board") {
       return;
     }
@@ -433,14 +438,18 @@ export function companyRoutes(db: Db, storage?: StorageService, options?: Compan
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
 
-    const companyScopeDecision = await access.decide({
-      actor: req.actor,
-      action: "company_scope:read",
-      resource: { type: "company", companyId },
-    });
-    if (!companyScopeDecision.allowed) {
-      res.status(403).json({ error: "Timeline is outside this actor's authorization boundary" });
-      return;
+    const authorization = await resourceQueryContext(db, companyId, req.actor);
+    if (authorization) res.setHeader("Cache-Control", "no-store");
+    else {
+      const companyScopeDecision = await access.decide({
+        actor: req.actor,
+        action: "company_scope:read",
+        resource: { type: "company", companyId },
+      });
+      if (!companyScopeDecision.allowed) {
+        res.status(403).json({ error: "Timeline is outside this actor's authorization boundary" });
+        return;
+      }
     }
 
     const query = timelineQuerySchema.parse(req.query);
@@ -455,6 +464,7 @@ export function companyRoutes(db: Db, storage?: StorageService, options?: Compan
       issueId: query.issueId,
       limit: parseIntegerQuery(query.limit, "limit"),
       offset: parseIntegerQuery(query.offset, "offset"),
+      ...(authorization ? { authorization } : {}),
       canReadIssue: async (issue) => {
         const decision = await access.decide({
           actor: req.actor,

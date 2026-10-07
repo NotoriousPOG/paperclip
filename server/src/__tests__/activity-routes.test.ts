@@ -69,7 +69,16 @@ async function createApp(
     };
     next();
   });
-  app.use("/api", activityRoutes({} as any));
+  const db = {
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          limit: async () => [],
+        }),
+      }),
+    }),
+  };
+  app.use("/api", activityRoutes(db as never));
   app.use(errorHandler);
   return app;
 }

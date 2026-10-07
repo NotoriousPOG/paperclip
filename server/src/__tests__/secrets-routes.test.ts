@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { secretRoutes } from "../routes/secrets.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { HttpError, unprocessable } from "../errors.js";
+import { unscopedQueryDb } from "./helpers/unscoped-query-db.js";
 
 const mockSecretService = vi.hoisted(() => ({
   listProviders: vi.fn(),
@@ -41,6 +42,10 @@ const mockSecretService = vi.hoisted(() => ({
   listAgentSecretAccess: vi.fn(),
   resolveSecretValueForAgentAccess: vi.fn(),
 }));
+const mockRestrictedAllowed = vi.hoisted(() => vi.fn());
+vi.mock("../services/restricted-secret-access.js", () => ({
+  restrictedSecretAccessService: () => ({ allowed: mockRestrictedAllowed }),
+}));
 const mockLogActivity = vi.hoisted(() => vi.fn());
 const mockAccessService = vi.hoisted(() => ({
   decide: vi.fn(),
@@ -69,7 +74,7 @@ function createApp(actor: Record<string, unknown> = {
     (req as any).actor = actor;
     next();
   });
-  app.use("/api", secretRoutes({} as any));
+  app.use("/api", secretRoutes(unscopedQueryDb() as any));
   app.use(errorHandler);
   return app;
 }
@@ -79,6 +84,7 @@ describe("secret routes", () => {
     for (const mock of Object.values(mockSecretService)) {
       mock.mockReset();
     }
+    mockRestrictedAllowed.mockReset().mockResolvedValue(true);
     mockLogActivity.mockReset();
     mockAccessService.decide.mockReset();
     mockAccessService.decide.mockResolvedValue({
@@ -86,6 +92,37 @@ describe("secret routes", () => {
       reason: "allow_standard_agent",
       explanation: "Allowed by test policy",
     });
+  });
+
+  it("omits restricted secret metadata from both company catalogs", async () => {
+    mockSecretService.list.mockResolvedValue([
+      { id: "private", companyId: "company-1", name: "Private credential" },
+      { id: "shared", companyId: "company-1", name: "Shared credential" },
+    ]);
+    mockRestrictedAllowed.mockImplementation(async (_company, id) => id === "shared");
+    for (const suffix of ["", "/catalog"]) {
+      const res = await request(createApp()).get(`/api/companies/company-1/secrets${suffix}`);
+      expect(res.status).toBe(200);
+      expect(JSON.stringify(res.body)).not.toContain("Private credential");
+      expect(res.body).toHaveLength(1);
+    }
+  });
+
+  it("denies known restricted IDs for reads and mutations before accessing data", async () => {
+    mockSecretService.getById.mockResolvedValue({ id: "private", companyId: "company-1", scope: "company", status: "active" });
+    mockRestrictedAllowed.mockResolvedValue(false);
+    const app = createApp();
+    const responses = [
+      await request(app).get("/api/secrets/private/usage"),
+      await request(app).get("/api/secrets/private/access-events"),
+      await request(app).delete("/api/secrets/private"),
+      await request(app).patch("/api/secrets/private").send({ name: "Stolen" }),
+      await request(app).post("/api/secrets/private/rotate").send({ value: "replacement" }),
+    ];
+    for (const response of responses) expect(response.status).toBe(404);
+    for (const method of ["listBindingReferences", "listAccessEvents", "remove", "update", "rotate"] as const) {
+      expect(mockSecretService[method]).not.toHaveBeenCalled();
+    }
   });
 
   it("returns an opaque secretRef in agent secret metadata without internal binding details", async () => {

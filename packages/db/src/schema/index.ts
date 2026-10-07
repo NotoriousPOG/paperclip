@@ -231,3 +231,6 @@ export { agentCommentary } from "./agent_commentary.js";
 
 
 export { agentIdentityKeys } from "./agent_identity_keys.js";
+export { accessGroups, accessGroupMembers, accessGroupResources, accessGroupNotes } from "./access_groups.js";
+export { resourceAccessScopes } from "./resource_access_scopes.js";
+export { resourceScopeMaintenance } from "./resource_scope_maintenance.js";

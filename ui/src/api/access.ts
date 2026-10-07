@@ -8,7 +8,9 @@ type InviteSummary = {
   companyId: string | null;
   companyName?: string | null;
   companyLogoUrl?: string | null;
-  inviteType: "company_join" | "bootstrap_ceo";
+  inviteType: "company_join" | "bootstrap_ceo" | "team_join";
+  teamRole?: "viewer" | "contributor" | null;
+  teamName?: string | null;
   allowedJoinTypes: "human" | "agent" | "both";
   humanRole?: HumanCompanyRole | null;
   expiresAt: string;
@@ -160,7 +162,9 @@ export type CompanyInviteRecord = {
   id: string;
   companyId: string | null;
   companyName: string | null;
-  inviteType: "company_join" | "bootstrap_ceo";
+  inviteType: "company_join" | "bootstrap_ceo" | "team_join";
+  teamRole?: "viewer" | "contributor" | null;
+  teamName?: string | null;
   allowedJoinTypes: "human" | "agent" | "both";
   humanRole: HumanCompanyRole | null;
   defaultsPayload: Record<string, unknown> | null;
@@ -187,7 +191,9 @@ export type CompanyJoinRequest = JoinRequest & {
   rejectedByUser: { id: string; email: string | null; name: string | null; image: string | null } | null;
   invite: {
     id: string;
-    inviteType: "company_join" | "bootstrap_ceo";
+    inviteType: "company_join" | "bootstrap_ceo" | "team_join";
+  teamRole?: "viewer" | "contributor" | null;
+  teamName?: string | null;
     allowedJoinTypes: "human" | "agent" | "both";
     humanRole: HumanCompanyRole | null;
     inviteMessage: string | null;

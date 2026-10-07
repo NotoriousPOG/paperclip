@@ -1,5 +1,6 @@
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { resourceScopeAuthorizationService } from "./resource-scope-authorization.js";
 import { withHumanDirectedWork } from "./human-directed-work.js";
 import { hasOwnerChatInstructionAuthority } from "./owner-chat-instruction-authority.js";
 import {
@@ -39,6 +40,7 @@ import {
 import { logger } from "../middleware/logger.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";
 import { grantsForHumanRole, normalizeHumanRole } from "./company-member-roles.js";
+import { evaluateScopedResourcePolicy, type ScopedResourceDenial } from "./scoped-resource-policy.js";
 
 export type AuthorizationActor =
   {
@@ -107,6 +109,8 @@ export type AuthorizationResource =
 
 export type AuthorizationDecision = {
   allowed: boolean;
+  resourcePolicyRevision?: number;
+  resourcePolicyDenial?: ScopedResourceDenial;
   action: AuthorizationAction;
   explanation: string;
   inboxPolicyMode?: InboxAgentPolicyMode | "grant_override";
@@ -127,6 +131,7 @@ export type AuthorizationDecision = {
     | "allow_self"
     | "allow_company_agent"
     | "allow_company_member"
+    | "allow_resource_scope"
     | "allow_simple_company_member"
     | "allow_manager_chain"
     | "inbox_target_user_unresolved"
@@ -141,7 +146,8 @@ export type AuthorizationDecision = {
     | "deny_policy_restricted"
     | "deny_low_trust_boundary"
     | "deny_scope"
-    | "deny_unsupported_action";
+    | "deny_unsupported_action"
+    | "deny_resource_policy";
   grant?: {
     principalType: PrincipalType;
     principalId: string;
@@ -2364,6 +2370,7 @@ export function authorizationService(db: Db | DbTransaction) {
       scope?: Record<string, unknown> | null;
     },
     agentDecision: AuthorizationDecision,
+    enforceCurrentMembership = false,
   ): Promise<AuthorizationDecision> {
     const responsibleUserId = input.actor.onBehalfOfUserId?.trim();
     if (
@@ -2376,11 +2383,9 @@ export function authorizationService(db: Db | DbTransaction) {
     }
 
     const companyId = companyIdForResource(input.resource);
-    const snapshot = await getResponsibleUserSnapshot({
-      actor: input.actor,
-      companyId,
-      userId: responsibleUserId,
-    });
+    const snapshot = enforceCurrentMembership
+      ? await loadResponsibleUserSnapshot(companyId, responsibleUserId)
+      : await getResponsibleUserSnapshot({ actor: input.actor, companyId, userId: responsibleUserId });
     const denyCode: AuthorizationDecision["code"] =
       snapshot.userExists && snapshot.activeMembership
         ? "RESPONSIBLE_USER_UNAUTHORIZED"
@@ -2442,7 +2447,7 @@ export function authorizationService(db: Db | DbTransaction) {
     });
 
     logger.warn({
-      authzMode: responsibleUserAuthzShadowMode() ? "shadow" : "enforce",
+      authzMode: !enforceCurrentMembership && responsibleUserAuthzShadowMode() ? "shadow" : "enforce",
       code: denied.code,
       reason: userDecision.reason,
       action: input.action,
@@ -2452,17 +2457,72 @@ export function authorizationService(db: Db | DbTransaction) {
       responsibleUserId,
     }, "responsible-user authorization intersection denied");
 
-    return input.action !== "agent_instructions:update" && responsibleUserAuthzShadowMode() ? agentDecision : denied;
+    return !enforceCurrentMembership && input.action !== "agent_instructions:update" && responsibleUserAuthzShadowMode() ? agentDecision : denied;
   }
+
+  const scopeMemberActions = new Set<AuthorizationAction>([
+    "issue:read",
+    "issue:comment",
+    "issue:mutate",
+    "project:read",
+    "agent:read",
+    "secrets:read",
+  ]);
 
   async function decide(input: {
     actor: AuthorizationActor;
     action: AuthorizationAction;
     resource: AuthorizationResource;
     scope?: Record<string, unknown> | null;
+    /** Server-loaded narrowing policy. Never forward request JSON here. */
+    resourcePolicy?: unknown;
+    /** Server-loaded, live execution authority, not JWT claims alone. */
+    executionGrant?: unknown;
   }): Promise<AuthorizationDecision> {
-    const agentDecision = await decideBase(input);
-    return applyResponsibleUserIntersection(input, agentDecision);
+    const persistedScope = await resourceScopeAuthorizationService(db).decide(input);
+    if (!persistedScope.allowed) {
+      return { allowed: false, action: input.action, reason: "deny_resource_policy", explanation: "Resource access policy denied this operation." };
+    }
+    const scopedDecision = Object.hasOwn(input, "resourcePolicy")
+      ? evaluateScopedResourcePolicy({
+          actor: input.actor,
+          action: input.action,
+          resource: input.resource,
+          policy: input.resourcePolicy,
+          executionGrant: input.executionGrant,
+        })
+      : null;
+    if (scopedDecision && !scopedDecision.allowed) {
+      return {
+        allowed: false,
+        action: input.action,
+        reason: "deny_resource_policy",
+        resourcePolicyDenial: scopedDecision.reason,
+        explanation: "Resource access policy denied this operation.",
+      };
+    }
+    // In-scope content reads and issue edits follow group membership. Company
+    // aggregates, wakes, runtime control, and secret administration do not.
+    if (persistedScope.restricted && scopeMemberActions.has(input.action)) {
+      return {
+        ...allow({
+          action: input.action,
+          reason: "allow_resource_scope",
+          explanation: "Allowed by membership in the resource scope. This does not grant execution or company administration.",
+        }),
+        ...(scopedDecision?.allowed ? { resourcePolicyRevision: scopedDecision.revision } : {}),
+      };
+    }
+    // Resource grants never activate legacy instance-admin elevation. Keep live
+    // company membership and the existing action restrictions as independent gates.
+    const evaluatedInput = scopedDecision?.allowed || persistedScope.restricted
+      ? { ...input, actor: { ...input.actor, isInstanceAdmin: false, ignoreInstanceAdmin: true } }
+      : input;
+    const agentDecision = await decideBase(evaluatedInput);
+    const decision = await applyResponsibleUserIntersection(evaluatedInput, agentDecision, Boolean(scopedDecision?.allowed || persistedScope.restricted));
+    return scopedDecision?.allowed
+      ? { ...decision, resourcePolicyRevision: scopedDecision.revision }
+      : decision;
   }
 
   // A candidate filter only: project policies and responsible-user grants are

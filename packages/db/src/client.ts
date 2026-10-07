@@ -1028,7 +1028,53 @@ export async function inspectMigrations(url: string): Promise<MigrationState> {
   }
 }
 
-export async function applyPendingMigrations(url: string): Promise<void> {
+function postgresErrorCode(error: unknown): string | undefined {
+  if (typeof error === "object" && error !== null && "code" in error && typeof error.code === "string") {
+    return error.code;
+  }
+  return undefined;
+}
+
+/** The non-bypass role cannot be created inside Drizzle's migration transaction. */
+async function ensureResourceScopeAppRole(url: string): Promise<void> {
+  const sql = createUtilitySql(url);
+  try {
+    const existing = await sql<{ one: number }[]>`
+      select 1 as one from pg_roles where rolname = 'paperclip_app' limit 1
+    `;
+    if (existing.length === 0) {
+      try {
+        await sql.unsafe(
+          "CREATE ROLE paperclip_app NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE LOGIN",
+        );
+      } catch (error) {
+        // A least-privilege operator cannot create cluster roles. The application
+        // pool stays on its current role, and protected execution stays denied.
+        if (postgresErrorCode(error) === "42501") return;
+        throw error;
+      }
+    }
+    const grants = [
+      "GRANT USAGE ON SCHEMA public TO paperclip_app",
+      "GRANT ALL ON ALL TABLES IN SCHEMA public TO paperclip_app",
+      "GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO paperclip_app",
+      "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO paperclip_app",
+      "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO paperclip_app",
+    ];
+    for (const statement of grants) {
+      try {
+        await sql.unsafe(statement);
+      } catch (error) {
+        if (postgresErrorCode(error) === "42501") return;
+        throw error;
+      }
+    }
+  } finally {
+    await sql.end();
+  }
+}
+
+async function applyPendingMigrationFiles(url: string): Promise<void> {
   const initialState = await inspectMigrations(url);
   if (initialState.status === "upToDate") return;
 
@@ -1086,6 +1132,11 @@ export async function applyPendingMigrations(url: string): Promise<void> {
       `Failed to apply pending migrations: ${finalState.pendingMigrations.join(", ")}`,
     );
   }
+}
+
+export async function applyPendingMigrations(url: string): Promise<void> {
+  await applyPendingMigrationFiles(url);
+  await ensureResourceScopeAppRole(url);
 }
 
 export type MigrationBootstrapResult =

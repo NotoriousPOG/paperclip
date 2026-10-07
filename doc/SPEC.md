@@ -6,6 +6,18 @@ Target specification for the Paperclip control plane. Living document — update
 
 ## 1. Company Model [DRAFT]
 
+Self-hosted resource permissions are being developed in reviewable increments
+under the [agent and user permissions specification](plans/2026-10-05-self-hosted-agent-user-permissions.md).
+The initial group authorization restricts invited private members to explicit
+group shares and denies unqualified APIs. The separate workspace UI was removed;
+restricted accounts await permission-filtered access in the normal interface.
+The selected implementation uses PostgreSQL and Paperclip's own evaluator, with
+no OpenFGA or classifier dependency. Persisted exclusive scopes now constrain
+central decisions and selected secondary routes; an instance-wide default-deny
+route boundary contains unaudited surfaces when such scopes exist. Production
+scope activation and isolated agent execution remain disabled. See implementation
+section 9.4 for the supported resources and current restrictions.
+
 A Company is a first-order object. One Paperclip instance runs multiple Companies. A Company does not have a standalone "goal" field — its direction is defined by its set of Initiatives (see Task Hierarchy Mapping).
 
 ### Fields (Draft)

@@ -177,7 +177,8 @@ export function InvitesSection() {
 
       <section className="space-y-4 rounded-xl border border-border p-5">
         <div className="space-y-1">
-          <h2 className="text-sm font-semibold">Invite a person</h2>
+          <h2 className="text-sm font-semibold">Invite a person with company-wide access</h2>
+          <p className="text-sm"><Link className="underline" to="/company/settings/teams">Invite into a private team instead</Link></p>
           <p className="text-sm text-muted-foreground">
             Generate a human invite link and choose the default access it should request.
           </p>

@@ -207,3 +207,5 @@ describe("the onboarding launcher's Add Agent button", () => {
     expect(dialogState.openOnboarding).toHaveBeenCalledWith();
   });
 });
+
+vi.mock("./pages/PrivateTeamGate", () => ({ PrivateTeamGate: ({ children }: any) => children }));

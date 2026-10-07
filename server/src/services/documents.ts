@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, sql, type SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { documentRevisions, documents, issueDocuments, issues } from "@paperclipai/db";
 import { isSystemIssueDocumentKey, issueDocumentKeySchema } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
+import { artifactAuthorizationConditions, type CompanyResourceAuthorization } from "./company-artifacts.js";
 import { isUniqueViolation } from "../db-errors.js";
 import { insertRowsInChunks } from "./batch-insert.js";
 import type { ImportIssueDocumentRow } from "./import-write-types.js";
@@ -86,6 +87,18 @@ export function mapIssueDocumentRow(
   };
 }
 
+type DocumentReadOptions = {
+  includeSystem?: boolean;
+  companyId?: string;
+  authorization?: CompanyResourceAuthorization;
+};
+
+function documentAdmission(options: DocumentReadOptions): SQL | undefined {
+  if (!options.authorization) return undefined;
+  if (!options.companyId) return sql`false`;
+  return artifactAuthorizationConditions(options.companyId, options.authorization).document;
+}
+
 export const issueDocumentSelect = {
   id: documents.id,
   companyId: documents.companyId,
@@ -115,20 +128,28 @@ export function documentService(db: Db) {
   return {
     getIssueDocumentPayload: async (
       issue: { id: string; description: string | null },
-      options: { includeSystem?: boolean } = {},
+      options: DocumentReadOptions = {},
     ) => {
+      const admission = documentAdmission(options);
       const [planDocument, documentSummaries] = await Promise.all([
         db
           .select(issueDocumentSelect)
           .from(issueDocuments)
           .innerJoin(documents, eq(issueDocuments.documentId, documents.id))
-          .where(and(eq(issueDocuments.issueId, issue.id), eq(issueDocuments.key, "plan")))
+          .where(and(
+            eq(issueDocuments.issueId, issue.id),
+            eq(issueDocuments.key, "plan"),
+            ...(admission ? [admission] : []),
+          ))
           .then((rows) => rows[0] ?? null),
         db
           .select(issueDocumentSelect)
           .from(issueDocuments)
           .innerJoin(documents, eq(issueDocuments.documentId, documents.id))
-          .where(eq(issueDocuments.issueId, issue.id))
+          .where(and(
+            eq(issueDocuments.issueId, issue.id),
+            ...(admission ? [admission] : []),
+          ))
           .orderBy(asc(issueDocuments.key), desc(documents.updatedAt)),
       ]);
 
@@ -148,23 +169,29 @@ export function documentService(db: Db) {
       };
     },
 
-    listIssueDocuments: async (issueId: string, options: { includeSystem?: boolean } = {}) => {
+    listIssueDocuments: async (issueId: string, options: DocumentReadOptions = {}) => {
+      const admission = documentAdmission(options);
       const rows = await db
         .select(issueDocumentSelect)
         .from(issueDocuments)
         .innerJoin(documents, eq(issueDocuments.documentId, documents.id))
-        .where(eq(issueDocuments.issueId, issueId))
+        .where(and(eq(issueDocuments.issueId, issueId), ...(admission ? [admission] : [])))
         .orderBy(asc(issueDocuments.key), desc(documents.updatedAt));
       return filterSystemDocuments(rows, options.includeSystem ?? false).map((row) => mapIssueDocumentRow(row, true));
     },
 
-    getIssueDocumentByKey: async (issueId: string, rawKey: string) => {
+    getIssueDocumentByKey: async (issueId: string, rawKey: string, options: DocumentReadOptions = {}) => {
       const key = normalizeDocumentKey(rawKey);
+      const admission = documentAdmission(options);
       const row = await db
         .select(issueDocumentSelect)
         .from(issueDocuments)
         .innerJoin(documents, eq(issueDocuments.documentId, documents.id))
-        .where(and(eq(issueDocuments.issueId, issueId), eq(issueDocuments.key, key)))
+        .where(and(
+          eq(issueDocuments.issueId, issueId),
+          eq(issueDocuments.key, key),
+          ...(admission ? [admission] : []),
+        ))
         .then((rows) => rows[0] ?? null);
       return row ? mapIssueDocumentRow(row, true) : null;
     },

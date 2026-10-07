@@ -1,6 +1,7 @@
 import { budgetServiceInTransaction, deliverBudgetEnforcement, type BudgetServiceHooks } from "./budgets.js";
 import { withAccountingTransaction } from "./accounting-transaction.js";
 import type { ActivityPublication } from "./activity-log.js";
+import { authorizedResourcePredicate, type AuthorizedResourceQuery } from "./authorized-resource-query.js";
 import { agentAppearanceSchema, randomAgentAppearance, resolveAgentAppearance, agentAvatarUrl } from "@paperclipai/shared";
 import { createHash, randomBytes } from "node:crypto";
 import { and, desc, eq, gte, inArray, lt, ne, or, sql } from "drizzle-orm";
@@ -891,8 +892,12 @@ export function agentService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
   }
 
   return {
-    list: async (companyId: string, options?: { includeTerminated?: boolean }) => {
+    list: async (companyId: string, options?: { includeTerminated?: boolean; authorization?: Omit<AuthorizedResourceQuery, "companyId" | "resource"> }) => {
       const conditions = [eq(agents.companyId, companyId)];
+      if (options?.authorization) conditions.push(authorizedResourcePredicate({
+        ...options.authorization, companyId,
+        resource: { type: "agent", id: agents.id, companyId: agents.companyId },
+      }));
       if (!options?.includeTerminated) {
         conditions.push(ne(agents.status, "terminated"));
       }

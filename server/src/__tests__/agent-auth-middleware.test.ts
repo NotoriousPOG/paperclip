@@ -285,6 +285,28 @@ describe("agent auth middleware", () => {
     expect(res.body.error).toContain("Agent token did not verify");
   });
 
+  it("rejects a deterministic corpus of mutated public gateway routes before handler dispatch", async () => {
+    const { db } = createDbState({ agent: { id: randomUUID(), companyId: randomUUID() } });
+    const app = createApp(db, "local_trusted");
+    const paths = new Set<string>();
+    // Mutate every position, then exercise URL encodings and extra segments.
+    // These are deliberately invalid public IDs, independent of the production regex.
+    for (let index = 0; index < 32; index++) {
+      paths.add(`/mcp/gateways/gw_${"a".repeat(index)}z${"a".repeat(31 - index)}`);
+    }
+    for (const suffix of ["/extra", "%2fextra", "%252fextra", "/%2e%2e/actor", ";ignored", "%00"]) {
+      paths.add(`/mcp/gateways/gw_${"a".repeat(32)}${suffix}`);
+    }
+    for (const length of [0, 1, 31, 33, 64]) paths.add(`/mcp/gateways/gw_${"a".repeat(length)}`);
+    for (const path of paths) {
+      const response = await request(app).post(path).set("Authorization", "Bearer pcgw_fixture_invalid")
+        .send({ jsonrpc: "2.0", id: 1, method: "initialize" });
+      expect(response.status, path).toBe(401);
+      expect(response.body.reachedGatewayProtocol, path).toBeUndefined();
+      expect(response.body.reachedWebhook, path).toBeUndefined();
+    }
+  });
+
   it.each([
     ["terminated", "Agent is terminated"],
     ["pending_approval", "Agent is pending approval"],

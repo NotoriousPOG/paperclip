@@ -1,3 +1,6 @@
+import { authorizedResourcePredicate, issueReadPredicate, resourceReadPredicate, type AuthorizedResourceQuery, type ResourceReadAuthorization } from "./authorized-resource-query.js";
+import { assertProposedIssuePlacement } from "./issue-placement-scope.js";
+import type { AuthorizationActor } from "./authorization.js";
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
 import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
 import { assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
@@ -1795,6 +1798,8 @@ export function parseStatusFilter(
 }
 
 export interface IssueFilters {
+  /** Trusted server identity only; never deserialize this from request query parameters. */
+  resourceAuthorization?: Omit<AuthorizedResourceQuery, "companyId" | "resource">;
   attention?: "blocked";
   status?: string | readonly string[];
   /**
@@ -1948,6 +1953,8 @@ type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId" | "title" |
   allowDuplicate?: boolean;
   assertCanReuseIssue?: (issue: typeof issues.$inferSelect) => Promise<void>;
   onDeduplicated?: (reason: "idempotency_key" | "recent_open_title") => void;
+  placementActor?: AuthorizationActor | null;
+  publishPlacement?: boolean;
 };
 type IssueChildCreateInput = IssueCreateInput & {
   acceptanceCriteria?: string[];
@@ -3452,6 +3459,7 @@ async function liveDescendantCountMapForIssues(
   dbOrTx: any,
   companyId: string,
   issueIds: string[],
+  authorization?: ResourceReadAuthorization,
 ): Promise<Map<string, number>> {
   const uniqueIssueIds = [...new Set(issueIds)];
   const map = new Map<string, number>();
@@ -3479,6 +3487,7 @@ async function liveDescendantCountMapForIssues(
             AND live_issue.harness_kind IS NULL
             AND live_run.company_id = ${companyId}
             AND live_run.status IN ('queued', 'running')
+            AND ${issueReadPredicate(companyId, authorization, sql`live_issue.id`, sql`live_issue.company_id`)}
           UNION
           SELECT DISTINCT live_issue.id, live_issue.parent_id
           FROM heartbeat_runs live_run
@@ -3488,6 +3497,7 @@ async function liveDescendantCountMapForIssues(
             AND live_issue.harness_kind IS NULL
             AND live_run.company_id = ${companyId}
             AND live_run.status IN ('queued', 'running')
+            AND ${issueReadPredicate(companyId, authorization, sql`live_issue.id`, sql`live_issue.company_id`)}
         ),
         live_ancestors(live_issue_id, ancestor_id, next_parent_id, visited_issue_ids) AS (
           SELECT live_issues.live_issue_id, parent.id, parent.parent_id, ARRAY[live_issues.live_issue_id, parent.id]
@@ -3606,6 +3616,7 @@ async function terminalExplicitBlockersByRoot(
   companyId: string,
   roots: IssueRelationIssueSummary[],
   dbOrTx: DbReader,
+  authorization?: ResourceReadAuthorization,
 ): Promise<Map<string, IssueRelationIssueSummary[]>> {
   const rootIds = [...new Set(roots.map((root) => root.id))];
   const terminalByRoot = new Map<string, IssueRelationIssueSummary[]>();
@@ -3646,6 +3657,7 @@ async function terminalExplicitBlockersByRoot(
             inArray(issueRelations.relatedIssueId, chunk),
             eq(issues.companyId, companyId),
             ne(issues.status, "done"),
+            issueReadPredicate(companyId, authorization, issues.id, issues.companyId),
           ),
         );
 
@@ -3702,6 +3714,7 @@ async function listIssueBlockerAttentionMap(
   dbOrTx: any,
   companyId: string,
   issueRows: IssueBlockerAttentionInputNode[],
+  authorization?: ResourceReadAuthorization,
 ): Promise<Map<string, IssueBlockerAttention>> {
   const roots = issueRows.filter(
     (row) => row.companyId === companyId && row.status === "blocked",
@@ -3766,6 +3779,7 @@ async function listIssueBlockerAttentionMap(
             eq(issueRelations.type, "blocks"),
             inArray(issueRelations.relatedIssueId, chunk),
             eq(issues.companyId, companyId),
+            issueReadPredicate(companyId, authorization, issues.id, issues.companyId),
           ),
         );
       const childRowsPromise: Promise<IssueBlockerAttentionQueryRow[]> = dbOrTx
@@ -3791,6 +3805,7 @@ async function listIssueBlockerAttentionMap(
               issues.status,
               BLOCKER_ATTENTION_CHILD_TERMINAL_STATUSES,
             ),
+            issueReadPredicate(companyId, authorization, issues.id, issues.companyId),
           ),
         );
       const [explicitBlockerRows, childRows] = await Promise.all([
@@ -5077,6 +5092,7 @@ async function blockedByMapForIssues(
   dbOrTx: any,
   companyId: string,
   issueIds: string[],
+  authorization?: ResourceReadAuthorization,
 ): Promise<Map<string, IssueRelationIssueSummary[]>> {
   const map = new Map<string, IssueRelationIssueSummary[]>();
   const uniqueIssueIds = [...new Set(issueIds)];
@@ -5108,6 +5124,7 @@ async function blockedByMapForIssues(
           eq(issueRelations.companyId, companyId),
           eq(issueRelations.type, "blocks"),
           inArray(issueRelations.relatedIssueId, issueIdChunk),
+          issueReadPredicate(companyId, authorization, issues.id, issues.companyId),
         ),
       );
 
@@ -5520,6 +5537,7 @@ async function listIssueBlockedInboxAttentionMap(
   dbOrTx: any,
   companyId: string,
   issueRows: BlockedInboxIssueRow[],
+  authorization?: ResourceReadAuthorization,
 ): Promise<Map<string, IssueBlockedInboxAttention>> {
   const rowIssueIds = [...new Set(issueRows.map((row) => row.id))];
   const result = new Map<string, IssueBlockedInboxAttention>();
@@ -5535,6 +5553,7 @@ async function listIssueBlockedInboxAttentionMap(
             eq(issues.companyId, companyId),
             visibleIssueCondition(),
             ne(issues.status, "done"),
+            issueReadPredicate(companyId, authorization, issues.id, issues.companyId),
           ),
         ),
       dbOrTx
@@ -5548,6 +5567,8 @@ async function listIssueBlockedInboxAttentionMap(
           and(
             eq(issueRelations.companyId, companyId),
             eq(issueRelations.type, "blocks"),
+            issueReadPredicate(companyId, authorization, issueRelations.issueId, issueRelations.companyId),
+            issueReadPredicate(companyId, authorization, issueRelations.relatedIssueId, issueRelations.companyId),
           ),
         ),
       dbOrTx
@@ -5561,7 +5582,10 @@ async function listIssueBlockedInboxAttentionMap(
           reportsTo: agents.reportsTo,
         })
         .from(agents)
-        .where(eq(agents.companyId, companyId)),
+        .where(and(
+          eq(agents.companyId, companyId),
+          resourceReadPredicate(companyId, authorization, { type: "agent", id: agents.id, companyId: agents.companyId }),
+        )),
     ]);
 
   const graphIssues = graphIssueRows as IssueRow[];
@@ -6129,6 +6153,7 @@ async function listIssueBlockedInboxAttentionMap(
       dbOrTx,
       companyId,
       [row],
+      authorization,
     );
     const blockerState = blockerAttention.get(row.id);
     if (
@@ -6194,6 +6219,10 @@ async function blockedInboxIssueConditions(
     visibleIssueCondition(),
     notInArray(issues.status, [...BLOCKED_INBOX_TERMINAL_STATUSES]),
   ];
+  if (filters?.resourceAuthorization) conditions.push(authorizedResourcePredicate({
+    ...filters.resourceAuthorization, companyId,
+    resource: { type: "issue", id: issues.id, companyId: issues.companyId },
+  }));
   const touchedByUserId = filters?.touchedByUserId?.trim() || undefined;
   const inboxArchivedByUserId =
     filters?.inboxArchivedByUserId?.trim() || undefined;
@@ -6384,12 +6413,12 @@ async function listBlockedInboxIssues(
       ? userReadStatsForIssues(dbOrTx, companyId, contextUserId, issueIds)
       : Promise.resolve([]),
     lastActivityStatsForIssues(dbOrTx, companyId, issueIds),
-    blockedByMapForIssues(dbOrTx, companyId, issueIds),
-    listIssueBlockerAttentionMap(dbOrTx, companyId, withRuns),
+    blockedByMapForIssues(dbOrTx, companyId, issueIds, filters?.resourceAuthorization),
+    listIssueBlockerAttentionMap(dbOrTx, companyId, withRuns, filters?.resourceAuthorization),
     listIssueReviewAttentionMap(dbOrTx, companyId, withRuns),
-    listIssueBlockedInboxAttentionMap(dbOrTx, companyId, withRuns),
+    listIssueBlockedInboxAttentionMap(dbOrTx, companyId, withRuns, filters?.resourceAuthorization),
     includeLiveDescendantSummary
-      ? liveDescendantCountMapForIssues(dbOrTx, companyId, issueIds)
+      ? liveDescendantCountMapForIssues(dbOrTx, companyId, issueIds, filters?.resourceAuthorization)
       : Promise.resolve(new Map<string, number>()),
   ]);
 
@@ -7262,6 +7291,7 @@ export function issueService(db: Db) {
     companyId: string,
     issueIds: string[],
     dbOrTx: DbReader = db,
+    authorization?: ResourceReadAuthorization,
   ): Promise<Map<string, IssueRelationSummaryMap>> {
     const uniqueIssueIds = [...new Set(issueIds)];
     const empty = new Map<string, IssueRelationSummaryMap>();
@@ -7289,6 +7319,7 @@ export function issueService(db: Db) {
             eq(issueRelations.companyId, companyId),
             eq(issueRelations.type, "blocks"),
             inArray(issueRelations.relatedIssueId, uniqueIssueIds),
+            issueReadPredicate(companyId, authorization, issues.id, issues.companyId),
           ),
         ),
       dbOrTx
@@ -7309,6 +7340,7 @@ export function issueService(db: Db) {
             eq(issueRelations.companyId, companyId),
             eq(issueRelations.type, "blocks"),
             inArray(issueRelations.issueId, uniqueIssueIds),
+            issueReadPredicate(companyId, authorization, issues.id, issues.companyId),
           ),
         ),
     ]);
@@ -7328,6 +7360,7 @@ export function issueService(db: Db) {
       companyId,
       [...empty.values()].flatMap((relations) => relations.blockedBy),
       dbOrTx,
+      authorization,
     );
 
     for (const relations of empty.values()) {
@@ -7368,12 +7401,14 @@ export function issueService(db: Db) {
     companyId: string,
     rows: T[],
     dbOrTx: DbReader = db,
+    authorization?: ResourceReadAuthorization,
   ): Promise<Array<T & IssueRelationSummaryMap>> {
     if (rows.length === 0) return [];
     const relationMap = await getIssueRelationSummaryMap(
       companyId,
       rows.map((row) => row.id),
       dbOrTx,
+      authorization,
     );
     return rows.map((row) => ({
       ...row,
@@ -7924,6 +7959,10 @@ export function issueService(db: Db) {
         eq(issues.companyId, companyId),
         visibleIssueCondition(),
       ];
+      if (filters?.resourceAuthorization) conditions.push(authorizedResourcePredicate({
+        ...filters.resourceAuthorization, companyId,
+        resource: { type: "issue", id: issues.id, companyId: issues.companyId },
+      }));
       if (!filters?.q?.trim()) {
         conditions.push(isNull(issues.conversationAgentId));
         if (!filters?.touchedByUserId && !filters?.unreadForUserId && !filters?.inboxArchivedByUserId) {
@@ -8082,7 +8121,7 @@ export function issueService(db: Db) {
       const issueSource = db.select(issueListSelect).from(issues);
       const searchedSource = hasSearch
         ? issueSource.innerJoin(sql`(
-            ${taskSearchCtes(companyId, taskSearch, true, and(...conditions))}
+            ${taskSearchCtes(companyId, taskSearch, true, and(...conditions), filters?.resourceAuthorization)}
             SELECT m.id, ${taskSearchScore(taskSearch)} AS score FROM matched m
           ) task_search`, sql`task_search.id = ${issues.id}`)
         : issueSource;
@@ -8139,10 +8178,10 @@ export function issueService(db: Db) {
           ? inboxArchiveRowsForIssues(db, companyId, contextUserId, issueIds)
           : Promise.resolve([]),
         includeBlockedBy
-          ? blockedByMapForIssues(db, companyId, issueIds)
+          ? blockedByMapForIssues(db, companyId, issueIds, filters?.resourceAuthorization)
           : Promise.resolve(new Map<string, IssueRelationIssueSummary[]>()),
         includeLiveDescendantSummary
-          ? liveDescendantCountMapForIssues(db, companyId, issueIds)
+          ? liveDescendantCountMapForIssues(db, companyId, issueIds, filters?.resourceAuthorization)
           : Promise.resolve(new Map<string, number>()),
       ]);
       const statsByIssueId = new Map(
@@ -8159,10 +8198,10 @@ export function issueService(db: Db) {
         reviewAttentionByIssueId,
         blockedInboxAttentionByIssueId,
       ] = await Promise.all([
-        listIssueBlockerAttentionMap(db, companyId, withRuns),
+        listIssueBlockerAttentionMap(db, companyId, withRuns, filters?.resourceAuthorization),
         listIssueReviewAttentionMap(db, companyId, withRuns),
         includeBlockedInboxAttention
-          ? listIssueBlockedInboxAttentionMap(db, companyId, withRuns)
+          ? listIssueBlockedInboxAttentionMap(db, companyId, withRuns, filters?.resourceAuthorization)
           : Promise.resolve(new Map<string, IssueBlockedInboxAttention>()),
       ]);
 
@@ -8258,6 +8297,10 @@ export function issueService(db: Db) {
       }
 
       const conditions = [eq(issues.companyId, companyId), visibleIssueCondition()];
+      if (filters?.resourceAuthorization) conditions.push(authorizedResourcePredicate({
+        ...filters.resourceAuthorization, companyId,
+        resource: { type: "issue", id: issues.id, companyId: issues.companyId },
+      }));
       if (!filters?.q?.trim()) {
         conditions.push(isNull(issues.conversationAgentId));
         if (!filters?.touchedByUserId && !filters?.unreadForUserId && !filters?.inboxArchivedByUserId) {
@@ -8311,10 +8354,18 @@ export function issueService(db: Db) {
       }
       if (!shouldIncludePluginOperationIssues(filters))
         conditions.push(nonPluginOperationIssueCondition());
-      const [row] = await db
-        .select({ count: sql<number>`count(*)` })
-        .from(issues)
-        .where(and(...conditions));
+      // Preserve legacy count semantics for existing callers. Authorized search
+      // counts use the same visibility-constrained search candidate set as list.
+      const search = filters?.resourceAuthorization && filters.q?.trim()
+        ? parseTaskSearch(filters.q.trim()) : undefined;
+      const source = db.select({ count: sql<number>`count(*)` }).from(issues);
+      const searchedSource = search
+        ? source.innerJoin(sql`(
+            ${taskSearchCtes(companyId, search, true, and(...conditions), filters?.resourceAuthorization)}
+            SELECT m.id FROM matched m
+          ) task_search`, sql`task_search.id = ${issues.id}`)
+        : source;
+      const [row] = await searchedSource.where(and(...conditions));
       return Number(row?.count ?? 0);
     },
 
@@ -8546,7 +8597,7 @@ export function issueService(db: Db) {
       return getCurrentScheduledRetryForIssue(issue.id, issue.companyId);
     },
 
-    getRelationSummaries: async (issueId: string) => {
+    getRelationSummaries: async (issueId: string, authorization?: ResourceReadAuthorization) => {
       const issue = await db
         .select({ id: issues.id, companyId: issues.companyId })
         .from(issues)
@@ -8557,6 +8608,7 @@ export function issueService(db: Db) {
         issue.companyId,
         [issueId],
         db,
+        authorization,
       );
       return relations.get(issueId) ?? { blockedBy: [], blocks: [] };
     },
@@ -9099,8 +9151,9 @@ export function issueService(db: Db) {
       companyId: string,
       issueRows: IssueBlockerAttentionInputNode[],
       dbOrTx: any = db,
+      authorization?: ResourceReadAuthorization,
     ) => {
-      return listIssueBlockerAttentionMap(dbOrTx, companyId, issueRows);
+      return listIssueBlockerAttentionMap(dbOrTx, companyId, issueRows, authorization);
     },
 
     listReviewAttention: async (
@@ -9224,7 +9277,21 @@ export function issueService(db: Db) {
         return null;
       }
 
-      const childIdsForSummaries = children
+      // Completion still sees every child. The prompt only names children this assignee can read.
+      const visibleChildRows = await db
+        .select({ id: issues.id })
+        .from(issues)
+        .where(and(
+          eq(issues.companyId, parent.companyId),
+          inArray(issues.id, children.map((child) => child.id)),
+          issueReadPredicate(parent.companyId, {
+            principal: { type: "agent", id: parent.assigneeAgentId },
+            operation: "read",
+          }, issues.id, issues.companyId),
+        ));
+      const visibleChildIds = new Set(visibleChildRows.map((row) => row.id));
+      const visibleChildren = children.filter((child) => visibleChildIds.has(child.id));
+      const childIdsForSummaries = visibleChildren
         .slice(0, MAX_CHILD_COMPLETION_SUMMARIES)
         .map((child) => child.id);
       const commentRows =
@@ -9251,12 +9318,12 @@ export function issueService(db: Db) {
           latestCommentByIssueId.set(comment.issueId, comment.body);
         }
       }
-      const childIssueSummaries: ChildIssueCompletionSummary[] = children
+      const childIssueSummaries: ChildIssueCompletionSummary[] = visibleChildren
         .slice(0, MAX_CHILD_COMPLETION_SUMMARIES)
         .map((child) => ({
           ...child,
           summary: truncateInlineSummary(
-            child.id === completedChildResult?.issueId
+            child.id === completedChildResult?.issueId && visibleChildIds.has(child.id)
               ? (completedChildResult.summary ??
                   latestCommentByIssueId.get(child.id))
               : latestCommentByIssueId.get(child.id),
@@ -9267,10 +9334,10 @@ export function issueService(db: Db) {
         onboardingCompletion: parent.originKind === "onboarding_first_task",
         id: parent.id,
         assigneeAgentId: parent.assigneeAgentId,
-        childIssueIds: children.map((child) => child.id),
+        childIssueIds: visibleChildren.map((child) => child.id),
         childIssueSummaries,
         childIssueSummaryTruncated:
-          children.length > childIssueSummaries.length,
+          visibleChildren.length > childIssueSummaries.length,
       };
     },
 
@@ -9809,8 +9876,20 @@ export function issueService(db: Db) {
         allowDuplicate,
         assertCanReuseIssue,
         onDeduplicated,
+        placementActor,
+        publishPlacement,
         ...issueData
       } = data;
+      await assertProposedIssuePlacement(dbOrTx as Db, {
+        companyId,
+        actor: placementActor,
+        publish: publishPlacement,
+        proposed: {
+          parentId: issueData.parentId ?? null,
+          projectId: issueData.projectId ?? null,
+          assigneeAgentId: issueData.assigneeAgentId ?? null,
+        },
+      });
       const explicitTitle = issueData.title?.trim();
       const provisionalTitle = issueData.description
         ? provisionalTitleFromDescription(issueData.description)
@@ -10645,6 +10724,8 @@ export function issueService(db: Db) {
         actorRunStopId?: string | null;
         actorUserId?: string | null;
         companyGuard?: string;
+        placementActor?: AuthorizationActor | null;
+        publishPlacement?: boolean;
       },
       dbOrTx: any = db,
       postCommitActivityPublications?: ActivityPublication[],
@@ -10692,8 +10773,23 @@ export function issueService(db: Db) {
         actorRunStopId,
         actorUserId,
         companyGuard,
+        placementActor,
+        publishPlacement,
         ...issueData
       } = data;
+      if (data.parentId !== undefined || data.projectId !== undefined || data.assigneeAgentId !== undefined) {
+        await assertProposedIssuePlacement(dbOrTx as Db, {
+          companyId: existing.companyId,
+          actor: placementActor,
+          publish: publishPlacement,
+          current: existing,
+          proposed: {
+            parentId: data.parentId !== undefined ? data.parentId : existing.parentId,
+            projectId: data.projectId !== undefined ? data.projectId : existing.projectId,
+            assigneeAgentId: data.assigneeAgentId !== undefined ? data.assigneeAgentId : existing.assigneeAgentId,
+          },
+        });
+      }
       // An explicit edit claims the title, even if it keeps the same text.
       if (issueData.title !== undefined) issueData.titleNeedsGeneration = false;
       if (
@@ -13203,7 +13299,7 @@ export function issueService(db: Db) {
 
     findMentionedProjectIds: async (
       issueId: string,
-      opts?: { includeCommentBodies?: boolean },
+      opts?: { includeCommentBodies?: boolean; authorization?: ResourceReadAuthorization },
     ) => {
       const issue = await db
         .select({
@@ -13250,13 +13346,18 @@ export function issueService(db: Db) {
           and(
             eq(projects.companyId, issue.companyId),
             inArray(projects.id, [...mentionedIds]),
+            resourceReadPredicate(issue.companyId, opts?.authorization, {
+              type: "project",
+              id: projects.id,
+              companyId: projects.companyId,
+            }),
           ),
         );
       const valid = new Set(rows.map((row) => row.id));
       return [...mentionedIds].filter((projectId) => valid.has(projectId));
     },
 
-    getAncestors: async (issueId: string) => {
+    getAncestors: async (issueId: string, authorization?: ResourceReadAuthorization) => {
       const raw: Array<{
         id: string;
         identifier: string | null;
@@ -13274,6 +13375,7 @@ export function issueService(db: Db) {
         .from(issues)
         .where(eq(issues.id, issueId))
         .then((r) => r[0] ?? null);
+      const ancestryCompanyId = start?.companyId;
       let currentId = start?.parentId ?? null;
       while (currentId && !visited.has(currentId) && raw.length < 50) {
         visited.add(currentId);
@@ -13294,6 +13396,18 @@ export function issueService(db: Db) {
           .where(eq(issues.id, currentId))
           .then((r) => r[0] ?? null);
         if (!parent) break;
+        if (authorization && ancestryCompanyId) {
+          const allowed = await db
+            .select({ id: issues.id })
+            .from(issues)
+            .where(and(
+              eq(issues.id, parent.id),
+              issueReadPredicate(ancestryCompanyId, authorization, issues.id, issues.companyId),
+            ))
+            .limit(1)
+            .then((rows) => rows[0] ?? null);
+          if (!allowed) break;
+        }
         raw.push({
           id: parent.id,
           identifier: parent.identifier ?? null,

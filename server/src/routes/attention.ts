@@ -2,6 +2,7 @@ import { Router } from "express";
 import type { Db } from "@paperclipai/db";
 import type { AttentionSortMode } from "@paperclipai/shared";
 import { attentionService } from "../services/attention.js";
+import { resourceQueryContext } from "../services/resource-query-context.js";
 import { badRequest } from "../errors.js";
 import { assertBoard, assertCompanyAccess } from "./authz.js";
 
@@ -38,8 +39,10 @@ export function attentionRoutes(db: Db) {
     const limitValue = optionalQueryString(req.query.limit, "limit");
     const limit = limitValue === undefined ? undefined : Number(limitValue);
     if (limit !== undefined && !Number.isInteger(limit)) throw badRequest("limit must be an integer");
+    const authorization = await resourceQueryContext(db, companyId, req.actor);
     const feed = await svc.list(companyId, {
       userId: req.actor.userId,
+      authorization,
       includeDismissed,
       archived,
       all,

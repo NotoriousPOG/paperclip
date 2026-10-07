@@ -5,6 +5,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { errorHandler } from "../middleware/index.js";
 import { projectRoutes } from "../routes/projects.js";
 import { issueRoutes } from "../routes/issues.js";
+import { unscopedQueryDb } from "./helpers/unscoped-query-db.js";
 
 const mockProjectService = vi.hoisted(() => ({
   create: vi.fn(),
@@ -147,7 +148,7 @@ function createProjectApp() {
 
 function createIssueApp() {
   issueServer ??= buildApp((expressApp) => {
-    expressApp.use("/api", issueRoutes({} as any, {} as any));
+    expressApp.use("/api", issueRoutes(unscopedQueryDb() as any, {} as any));
   }).listen(0);
   return issueServer;
 }

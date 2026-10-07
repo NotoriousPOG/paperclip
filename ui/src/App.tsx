@@ -65,6 +65,9 @@ import { BootstrapSetupUxLab } from "./pages/BootstrapSetupUxLab";
 import { ResponsibleUserDenialUxLab } from "./pages/ResponsibleUserDenialUxLab";
 import { CrossIssueCollaborationUxLab } from "./pages/CrossIssueCollaborationUxLab";
 import { CompanySettingsPluginPage } from "./pages/CompanySettingsPluginPage";
+import { CompanyTeams } from "./pages/CompanyTeams";
+import { PrivateTeamGate } from "./pages/PrivateTeamGate";
+import { CompanyPermissions } from "./pages/CompanyPermissions";
 import { CompanyAccess, CompanyAccessLegacyRoute } from "./pages/CompanyAccess";
 import { AdvancedToolsRoute } from "./pages/tools/AdvancedToolsRoute";
 import { ProfileWizardRoute } from "./pages/tools/profiles/ProfileWizardRoute";
@@ -165,6 +168,8 @@ function boardRoutes(streamlinedUiEnabled: boolean, combinedInboxTasksEnabled: b
       <Route path="company/settings/environments" element={<Navigate to="/company/settings/instance/environments" replace />} />
       <Route path="company/settings/cloud-upstream" element={<Navigate to="/company/export" replace />} />
       <Route element={<HiddenSettingsPageGate pageKey="company.members" />}>
+        <Route path="company/settings/teams" element={<CompanyTeams />} />
+        <Route path="company/settings/permissions" element={<CompanyPermissions />} />
         <Route path="company/settings/members" element={<CompanyAccess />} />
         <Route path="company/settings/access" element={<CompanyAccessLegacyRoute />} />
       </Route>
@@ -796,7 +801,7 @@ export function App() {
   const { enabled: combinedInboxTasksEnabled } = useCombinedInboxTasksEnabled();
 
   return (
-    <>
+    <PrivateTeamGate>
       <Routes>
         <Route path="oauth-handoff" element={<PaperclipCloudOAuthHandoffPage />} />
         <Route path="auth" element={<AuthPage />} />
@@ -893,6 +898,6 @@ export function App() {
         </Route>
       </Routes>
       <OnboardingWizardVariant />
-    </>
+    </PrivateTeamGate>
   );
 }

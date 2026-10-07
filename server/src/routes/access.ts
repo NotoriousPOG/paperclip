@@ -13,11 +13,15 @@ import { isIP } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Router } from "express";
+import { accessGroupService } from "../services/access-groups.js";
+import { teamInviteDefaultsSchema } from "@paperclipai/shared/access-groups";
+import { permissionEditorRoutes } from "./permission-editor.js";
 import type { Request } from "express";
 import { and, desc, eq, gt, inArray, isNotNull, isNull, lte, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   assets,
+  accessGroups,
   agentApiKeys,
   authUsers,
   companies,
@@ -1125,6 +1129,7 @@ function toInviteSummaryResponse(
     companyName: companyInfo?.name ?? null,
     companyLogoUrl: companyInfo?.logoUrl ?? null,
     inviteType: invite.inviteType,
+    teamRole: invite.inviteType === "team_join" ? teamInviteDefaultsSchema.safeParse(invite.defaultsPayload).data?.team.role ?? null : null,
     allowedJoinTypes: invite.allowedJoinTypes,
     humanRole: extractInviteHumanRole(invite),
     expiresAt: invite.expiresAt,
@@ -2117,6 +2122,7 @@ function inviteState(invite: typeof invites.$inferSelect) {
 }
 
 function extractInviteHumanRole(invite: typeof invites.$inferSelect) {
+  if (invite.inviteType === "team_join") return "viewer";
   if (invite.allowedJoinTypes === "agent") return null;
   return resolveHumanInviteRole(
     invite.defaultsPayload as Record<string, unknown> | null | undefined,
@@ -2637,6 +2643,7 @@ export function accessRoutes(
   }
 ) {
   const router = Router();
+  router.use(permissionEditorRoutes(db));
   const access = accessService(db);
   const boardAuth = boardAuthService(db);
   const agents = agentService(db);
@@ -3452,8 +3459,17 @@ export function accessRoutes(
           (m) => m.get(invite.invitedByUserId!)?.name ?? null
         )
       : null;
+    let teamName: string | null = null;
+    if (invite.inviteType === "team_join") {
+      const parsed = teamInviteDefaultsSchema.safeParse(invite.defaultsPayload);
+      if (!parsed.success || !invite.companyId) throw notFound("Invite not found");
+      const [team] = await db.select({ name: accessGroups.name }).from(accessGroups).where(and(eq(accessGroups.id, parsed.data.team.groupId), eq(accessGroups.companyId, invite.companyId), eq(accessGroups.audience, "team")));
+      if (!team) throw notFound("Invite not found");
+      teamName = team.name;
+    }
     res.json({
       ...toInviteSummaryResponse(req, token, invite, companyBranding, opts.authPublicBaseUrl),
+      teamName,
       invitedByUserName: inviterName,
       joinRequestStatus: inviteJoinRequest?.status ?? null,
       joinRequestType: inviteJoinRequest?.requestType ?? null,
@@ -3654,6 +3670,11 @@ export function accessRoutes(
         .then((rows) => rows[0] ?? null);
       if (!invite || invite.revokedAt || inviteExpired(invite)) {
         throw notFound("Invite not found");
+      }
+      if (invite.inviteType === "team_join") {
+        if (req.body.requestType !== "human" || req.actor.type !== "board" || !req.actor.userId || req.actor.source === "local_implicit") throw forbidden("Sign in to accept a private team invitation");
+        res.status(202).json(await accessGroupService(db).acceptInvite(invite.id, req.actor.userId));
+        return;
       }
       const inviteAlreadyAccepted = Boolean(invite.acceptedAt);
       const existingJoinRequestForInvite = inviteAlreadyAccepted

@@ -1,4 +1,5 @@
 import { composeConnectionInstructions } from "./connection-instructions.js";
+import { PROTECTED_EXECUTION_DENIAL, hasRestrictedResources, isPrivateTeamPrincipal } from "./private-team-access.js";
 import { isInsufficientConnectionScope, INSUFFICIENT_CONNECTION_SCOPE_MESSAGE } from "./connection-permission-errors.js";
 import { boundedMcpToolName } from "./mcp-tool-names.js";
 import { browserUseService } from "./browser-use.js";
@@ -1991,6 +1992,12 @@ export function createToolGatewayService(
   async function captureSessionIdentity(
     session: ToolGatewaySession,
   ): Promise<ToolGatewaySession> {
+    if (await hasRestrictedResources(db)
+      || await isPrivateTeamPrincipal(db, session.companyId, "agent", session.agentId)
+      || await isPrivateTeamPrincipal(db, session.companyId, "user", session.responsibleUserId)
+      || (session.actorType === "user" && await isPrivateTeamPrincipal(db, session.companyId, "user", session.actorId))) {
+      throw new ToolGatewayHttpError(403, PROTECTED_EXECUTION_DENIAL, "private_team_denied");
+    }
     // Authentication creates a fresh operation snapshot on every invocation.
     // Never trust a previously attached context on a reusable transport session.
     // Approved operations restore their signed origin after authentication.
@@ -2012,6 +2019,9 @@ export function createToolGatewayService(
       agentId: session.agentId,
       runId: session.runId,
     });
+    if (await isPrivateTeamPrincipal(db, session.companyId, "user", captured.context?.responsibleUserId)) {
+      throw new ToolGatewayHttpError(403, PROTECTED_EXECUTION_DENIAL, "private_team_denied");
+    }
     return {
       ...session,
       identityContextId: captured.context?.id,
@@ -6978,6 +6988,11 @@ export function createToolGatewayService(
         clientMetadata,
       });
     }
+    if (await hasRestrictedResources(db)
+      || await isPrivateTeamPrincipal(db, row.gateway.companyId, "agent", row.token.createdByAgentId)
+      || await isPrivateTeamPrincipal(db, row.gateway.companyId, "user", row.token.createdByUserId)) {
+      throw new ToolGatewayHttpError(403, PROTECTED_EXECUTION_DENIAL, "private_team_denied");
+    }
     if (row.gateway.status !== "active") {
       await recordNamedGatewayAuthFailure({
         gatewayId: input.gatewayId,
@@ -8913,6 +8928,9 @@ export function createToolGatewayService(
       actorId?: string;
     }): Promise<ToolGatewaySession> {
       await assertAgentInCompany(input.companyId, input.agentId);
+      if (await hasRestrictedResources(db)) {
+        throw new ToolGatewayHttpError(403, PROTECTED_EXECUTION_DENIAL, "private_team_denied");
+      }
       const { issueId, projectId } = await resolveRunContext(input);
       const now = new Date();
       const sessionId = randomUUID();
