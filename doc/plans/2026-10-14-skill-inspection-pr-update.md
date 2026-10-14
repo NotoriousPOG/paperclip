@@ -49,9 +49,20 @@ checks when their entries change. Real-scanner corpus qualification is separate
 from tests that use a stub scanner; record its availability honestly.
 
 Rollback is a revert of this PR's feature changes. Disabling an optional scanner
-restores baseline behavior; a configured but broken scanner must produce a hold.
+removes its review gate; built-in checks remain. A configured but broken scanner
+must produce a hold.
 
 ## Status
 
 - Base merge completed in `805c868c6`; seven conflicts were resolved.
-- Enforcement and validation are in progress.
+- Enforcement is implemented. All 152 focused tests across eight files passed.
+  Build, typecheck, token gates, map checks, and the 22-sample real-scanner corpus
+  passed. Server and UI builds and UI typecheck also passed after the final fix.
+- Final review staged admitted local package inventories so an unrelated
+  project-root file or symlink cannot enter scanner input. The regression failed
+  before this fix and passed afterward.
+- The full repository run is in progress. Five workspace provisioning failures
+  and one heartbeat cancellation failure reproduced on the unchanged base
+  `1e731520b`. The full gate is not claimed green.
+- GitHub Dependency Review reports that the fork does not support the feature;
+  remote checks are not claimed green.

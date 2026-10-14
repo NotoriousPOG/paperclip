@@ -127,4 +127,20 @@ describe.skipIf(!support.supported)("skill inspection before publication", () =>
     expect((await db.select({ sourceLocator: companySkills.sourceLocator }).from(companySkills).where(eq(companySkills.companyId, companyId)))
       .filter(skill => skill.sourceLocator === directory)).toEqual([]);
   });
+
+  it("scans only the admitted files of a project-root skill", async () => {
+    const workspace = path.join(root, companyId);
+    await fs.mkdir(workspace);
+    await fs.writeFile(path.join(workspace, "SKILL.md"), markdown());
+    const excluded = path.join(root, `${companyId}-unrelated.txt`);
+    await fs.writeFile(excluded, "INSPECTION_HOLD");
+    await fs.symlink(excluded, path.join(workspace, "unrelated-workspace-file"));
+    const projectId = randomUUID();
+    await db.insert(projects).values({ id: projectId, companyId, name: "Root skill" });
+    await db.insert(projectWorkspaces).values({ companyId, projectId, name: "Workspace", cwd: workspace, isPrimary: true });
+    const result = await companySkillService(db).scanProjectWorkspaces(companyId, { projectIds: [projectId], review: true });
+    expect(result).toMatchObject({ held: false });
+    expect(result.imported).toHaveLength(1);
+    expect(result.imported[0]!.fileInventory).toEqual([{ path: "SKILL.md", kind: "skill" }]);
+  });
 });

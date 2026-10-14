@@ -684,7 +684,8 @@ When [NVIDIA SkillSpector](https://github.com/NVIDIA/skillspector) is installed 
 the Paperclip server, `skills import`, `skills install`, and `skills scan-projects`
 run a static SkillSpector scan (`--no-llm`) on each new skill before it is saved.
 The server uses `SKILLSPECTOR_BIN` when set, otherwise the first `skillspector` on
-`PATH`. Without SkillSpector, installs behave exactly as before. An operator can
+`PATH`. Without SkillSpector, no optional scanner review is added. Built-in safety
+checks still apply. An operator can
 set `SKILLSPECTOR_ENABLED=false` to disable this optional integration. A configured
 but unavailable scanner holds changes rather than silently skipping inspection.
 
@@ -711,7 +712,10 @@ but unavailable scanner holds changes rather than silently skipping inspection.
   (`SKILLSPECTOR_TIMEOUT_MS` overrides it). Its supply-chain rule may send
   dependency names to OSV.
 - URL and skills.sh imports are scanned from the downloaded `SKILL.md`; GitHub,
-  local-path, catalog, and project-workspace imports are scanned with all files.
+  local-path, catalog, and project-workspace imports are scanned from their
+  admitted package inventories. Project-root skills do not expose unrelated
+  workspace files to the scanner. Local packages are staged into private temporary
+  directories rather than scanned in place.
 
 Static inspection can miss malicious instructions and flag legitimate content.
 It is one control against the attacks described in the

@@ -7,6 +7,7 @@ import {
   mapInspections,
   skillInspectionEnabled,
   scanSkillDirectory,
+  scanSkillFiles,
   withPaperclipAuditFindings,
 } from "./skill-inspector.js";
 import { removeRuntimeSkillCache, resolveRuntimeSkillCache, runtimeSkillCacheSpec } from "./runtime-skill-cache.js";
@@ -119,7 +120,7 @@ import {
   stringifyFrontmatter,
 } from "@paperclipai/shared";
 import { resolvePaperclipInstanceRoot } from "../home-paths.js";
-import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
+import { HttpError, conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { ghFetch, gitHubApiBase, resolveRawGitHubUrl } from "./github-fetch.js";
 import { agentService } from "./agents.js";
 import { issueDocumentSelect, mapIssueDocumentRow } from "./documents.js";
@@ -7441,25 +7442,38 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
   }
 
   /**
-   * Inspect a skill before it is persisted. Local packages are scanned in place; URL
-   * imports only carry SKILL.md at this point, so that is what gets scanned.
+   * Stage only the admitted package inventory. Project-root skills must not make
+   * the scanner read unrelated workspace files or follow their symlinks.
    */
   async function inspectImportedSkill(skill: ImportedSkill): Promise<CompanySkillInspection | null> {
     if (!skillInspectionEnabled()) return null;
-    let stagingDir: string | null = null;
     try {
+      const files: CompanySkillVersionFileInventoryEntry[] = [{ path: "SKILL.md", kind: "skill", content: skill.markdown }];
       const localDir = skill.sourceType === "local_path"
         ? await resolveExistingSkillDirectory(normalizeSourceLocatorDirectory(skill.sourceLocator))
         : null;
-      if (localDir) return await inspectSkillDirectory(skill.slug, skill.name, localDir);
-      stagingDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-skill-inspect-"));
-      await fs.writeFile(path.join(stagingDir, "SKILL.md"), skill.markdown, { mode: 0o600 });
-      return await inspectSkillDirectory(skill.slug, skill.name, stagingDir);
+      if (localDir) {
+        const packageRoot = await fs.realpath(localDir);
+        for (const entry of skill.fileInventory) {
+          if (entry.path === "SKILL.md") continue;
+          const file = path.join(packageRoot, assertSkillSnapshotPath(entry.path));
+          const resolved = await fs.realpath(file);
+          const relative = path.relative(packageRoot, resolved);
+          if (!relative || relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)
+            || (await fs.lstat(file)).isSymbolicLink()) {
+            throw forbidden("Skill inspection files must stay in the admitted package.", { code: "skill_workspace_boundary_denied" });
+          }
+          files.push(snapshotFile(entry.path, entry.kind, await fs.readFile(resolved)));
+        }
+      }
+      const [inspection, findings] = await Promise.all([
+        scanSkillFiles(skill.slug, skill.name, files), auditSkillSnapshot(files),
+      ]);
+      return withPaperclipAuditFindings(inspection, findings.filter(finding => INSPECTION_AUDIT_CODES.has(finding.code)));
     } catch (error) {
+      if (error instanceof HttpError) throw error;
       logger.warn({ err: error, skillSlug: skill.slug }, "skill inspection failed before install");
       return failedInspection(skill.slug, skill.name, "SkillSpector could not finish the scan.");
-    } finally {
-      if (stagingDir) await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
     }
   }
 

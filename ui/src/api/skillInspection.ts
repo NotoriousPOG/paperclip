@@ -17,10 +17,10 @@ function isInspection(value: unknown): value is CompanySkillInspection {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>; // Narrow a JSON object's fields before using them.
   return typeof record.skillId === "string" && typeof record.skillName === "string"
-    && ["clean", "findings", "error", "unavailable"].includes(String(record.status))
+    && typeof record.status === "string" && ["clean", "findings", "error", "unavailable"].includes(record.status)
     && typeof record.blocking === "boolean"
     && (record.score === null || (typeof record.score === "number" && Number.isFinite(record.score)))
-    && (record.recommendation === null || ["SAFE", "CAUTION", "DO_NOT_INSTALL"].includes(String(record.recommendation)))
+    && (record.recommendation === null || (typeof record.recommendation === "string" && ["SAFE", "CAUTION", "DO_NOT_INSTALL"].includes(record.recommendation)))
     && (record.message === null || typeof record.message === "string")
     && (record.severity === null || typeof record.severity === "string")
     && Array.isArray(record.findings) && record.findings.every(finding =>

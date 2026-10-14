@@ -12,6 +12,7 @@ import { useBreadcrumbs } from '@/context/BreadcrumbContext';
 import { queryKeys } from '@/lib/queryKeys';
 import { skillSourcesApi } from '@/api/skillSources';
 import { ApiError } from '@/api/client';
+import { inspectionHoldFromError } from '@/api/skillInspection';
 import { Command, CommandInput, CommandList, CommandEmpty, CommandGroup, CommandItem } from '@/components/ui/command';
 import { appSourceConnectHref } from './apps/app-connect-policy';
 import { Button } from '@/components/ui/button';
@@ -350,7 +351,7 @@ function SourceDialog({ companyId, source, onClose, onSaved }: {
         {selectionTree}
         <SkillImportWarnings warnings={warnings} />
       </div>}
-      {error && !saveInspectionHold.dialogProps(false).deciding && <p role="alert" className="text-sm text-destructive">{error.message}{' '}<Link onClick={rememberReturn} to={connectHref} className="underline">Connect a GitHub account</Link></p>}
+      {error && !saveInspectionHold.dialogProps(false).deciding && <p role="alert" className="text-sm text-destructive">{error.message}{!inspectionHoldFromError(error) && <>{' '}<Link onClick={rememberReturn} to={connectHref} className="underline">Connect a GitHub account</Link></>}</p>}
       {scan.isPending && <SkillImportProgress repository={parsedRepository?.fullName ?? repositoryUrl} progress={progress} found={found} />}
       {save.isPending && <SkillImportProgress importing repository={source?.fullName ?? discovery!.fullName} count={selectedCount}
         found={candidates.filter(candidate => selected.has(candidate.path) && !candidate.error).map(candidate => ({ ...candidate, fileCount: candidate.inspection?.files.length ?? 1 }))} />}
