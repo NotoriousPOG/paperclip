@@ -678,6 +678,52 @@ only an explicit company skill policy restriction does. Core safety and company
 boundary checks still apply, and `agents:create` remains required when a command
 also creates agents.
 
+### Optional SkillSpector inspection
+
+When [NVIDIA SkillSpector](https://github.com/NVIDIA/skillspector) is installed on
+the Paperclip server, `skills import`, `skills install`, and `skills scan-projects`
+run a static SkillSpector scan (`--no-llm`) on each new skill before it is saved.
+The server uses `SKILLSPECTOR_BIN` when set, otherwise the first `skillspector` on
+`PATH`. Without SkillSpector, no optional scanner review is added. Built-in safety
+checks still apply. An operator can
+set `SKILLSPECTOR_ENABLED=false` to disable this optional integration. A configured
+but unavailable scanner holds changes rather than silently skipping inspection.
+
+- The install is held unless SkillSpector rates the skill `SAFE`. A `CAUTION` or
+  `DO_NOT_INSTALL` rating, any `HIGH` or `CRITICAL` finding, or a scan that fails to
+  finish holds it. In static mode SkillSpector rates most real attacks `CAUTION`.
+- The same check also applies Paperclip's built-in audit rules for remote
+  fetch-and-execute and secret exfiltration, which catch patterns such as
+  `base64 -d | sh` and `python3 -c` that SkillSpector's static mode misses.
+- A held response has `held: true` and the `inspections`; held skills are not added.
+- A board user can rerun the command with `--accept-inspection` to install anyway.
+  Agent API keys cannot accept a held install. Holds and overrides are written to
+  the activity log (`company.skill_inspection_held`, `company.skill_inspection_accepted`).
+- The same pre-publication gate applies to source creation, selection, and manual
+  or automatic refresh. Complete repository packages include shared dependency
+  files in the scan. Source holds return `409` with `skill_inspection_held` and
+  structured findings; installed content and versions are retained. Automatic
+  refresh never saves an override. The Sources UI lets a board user review and
+  accept the current change. Workspace scans also check existing skills before
+  updating their stored content.
+- Scanner acceptance cannot waive Paperclip's hard content-safety checks or a
+  company policy denial. Imported scripts are not executed during inspection.
+- The scanner runs with a minimal environment and a 60 second timeout
+  (`SKILLSPECTOR_TIMEOUT_MS` overrides it). Its supply-chain rule may send
+  dependency names to OSV.
+- URL and skills.sh imports are scanned from the downloaded `SKILL.md`; GitHub,
+  local-path, catalog, and project-workspace imports are scanned from their
+  admitted package inventories. Project-root skills do not expose unrelated
+  workspace files to the scanner. Local packages are staged into private temporary
+  directories rather than scanned in place.
+
+Static inspection can miss malicious instructions and flag legitimate content.
+It is one control against the attacks described in the
+[Snyk ToxicSkills study](https://snyk.io/blog/toxicskills-malicious-ai-agent-skills-clawhub/)
+(2026-02-05). Inspection does not isolate an agent's runtime or grant/restrict its
+resource access. Files edited directly in a local workspace remain mutable;
+holding their library refresh does not undo that filesystem edit.
+
 ### Catalog (app-shipped skills)
 
 The Paperclip app ships a curated catalog under `@paperclipai/skills-catalog`.
@@ -688,7 +734,7 @@ skill to the company library.
 npx paperclipai skills browse [--kind bundled|optional] [--category <slug>] [--query <text>]
 npx paperclipai skills search "<text>" [--kind bundled|optional] [--category <slug>]
 npx paperclipai skills inspect <catalog-id-or-key-or-slug>
-npx paperclipai skills install <catalog-id-or-key-or-slug> [--as <slug>] [--force] --company-id <company-id>
+npx paperclipai skills install <catalog-id-or-key-or-slug> [--as <slug>] [--force] [--accept-inspection] --company-id <company-id>
 ```
 
 Catalog semantics:

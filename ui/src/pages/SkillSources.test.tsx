@@ -62,6 +62,26 @@ afterEach(async () => {
 });
 
 describe('GitHub skill source import', () => {
+  it('reviews a held import and sends acceptance only after the board chooses it', async () => {
+    const candidate = { path: 'skills/main/SKILL.md', name: 'Main', description: null, fileCount: 1, error: null, warnings: [] };
+    sessionStorage.setItem('paperclip.skill-source-draft:company-1:new', JSON.stringify({ packageMode: 'repository', selectedPaths: [candidate.path],
+      discovery: { ...discovery, packageMode: 'repository', candidates: [candidate], repositoryPackage: { files: [], requirements: null, error: null, warnings: [] } } }));
+    const held = new ApiError('Held', 409, { details: { code: 'skill_inspection_held', inspections: [{
+      skillId: candidate.path, skillName: 'Main', status: 'findings', recommendation: 'CAUTION', blocking: true,
+      score: 25, severity: 'LOW', findings: [], message: 'Review this change.',
+    }] } });
+    vi.mocked(skillSourcesApi.create).mockRejectedValueOnce(held).mockResolvedValueOnce({ source: sourceFixture(), imported: [], updated: [], unchanged: 0, warnings: [] });
+    await mount();
+    await act(async () => button('Import repository').click()); await flush();
+    expect(document.body.textContent).toContain('The new content has not been saved');
+    expect(context.navigate).not.toHaveBeenCalled();
+    expect(skillSourcesApi.create).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(skillSourcesApi.create).mock.calls[0]![1].acceptInspection).toBeUndefined();
+    await act(async () => button('Install anyway').click()); await flush();
+    expect(skillSourcesApi.create).toHaveBeenLastCalledWith('company-1', expect.objectContaining({ acceptInspection: true }));
+    expect(context.navigate).toHaveBeenCalled();
+  });
+
   it('groups the same repository and ref across projects and shows import progress until it is installed', async () => {
     context.sourceId = '';
     const repository = { projectId: 'one', projectName: 'Paperclip', projectVisibility: 'open' as const,

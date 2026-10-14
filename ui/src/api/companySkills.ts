@@ -18,6 +18,7 @@ import type {
   CompanySkillImportResult,
   CompanySkillInstallCatalogRequest,
   CompanySkillInstallCatalogResult,
+  CompanySkillInspectionHold,
   CompanySkillListQuery,
   CompanySkillListItem,
   CompanySkillProjectBrowseRequest,
@@ -212,10 +213,10 @@ export const companySkillsApi = {
       `/companies/${encodeURIComponent(companyId)}/skills/${encodeURIComponent(skillId)}`,
       payload,
     ),
-  importFromSource: (companyId: string, source: string) =>
+  importFromSource: (companyId: string, source: string, options?: { acceptInspection?: boolean }) =>
     api.post<CompanySkillImportResult>(
       `/companies/${encodeURIComponent(companyId)}/skills/import`,
-      { source },
+      { source, acceptInspection: options?.acceptInspection },
     ),
   browseProject: (companyId: string, payload: CompanySkillProjectBrowseRequest) =>
     api.post<CompanySkillProjectBrowseResult>(
@@ -251,7 +252,7 @@ export const companySkillsApi = {
       `/skills/catalog/${encodeURIComponent(catalogRef)}/files?path=${encodeURIComponent(relativePath)}`,
     ),
   installCatalog: (companyId: string, payload: CompanySkillInstallCatalogRequest) =>
-    api.post<CompanySkillInstallCatalogResult>(
+    api.post<CompanySkillInstallCatalogResult | CompanySkillInspectionHold>(
       `/companies/${encodeURIComponent(companyId)}/skills/install-catalog`,
       payload,
     ),

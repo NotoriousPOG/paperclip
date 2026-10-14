@@ -37,6 +37,15 @@ remaining operations before qualifying the whole capability.
 Gaps: Installation/import is governed by company skill policy, not inferred from an
 agent's role name.
 
+Configured SkillSpector inspection adds a pre-publication gate for imports,
+source selection/refresh, repository packages, and workspace refreshes. A held
+source operation returns `409` and `skill_inspection_held`. Agents cannot send
+`acceptInspection: true`; only authenticated board routes derive this authority.
+Unattended refresh never stores or inherits a previous override. Platform safety
+checks and stored policy denials remain authoritative. The
+[publication regressions](../../server/src/__tests__/skill-inspection-publication.test.ts)
+cover ordering and actor denials with fixtures; no live agent-run claim is added.
+
 ## `authoring`
 
 Review: `baseline`.

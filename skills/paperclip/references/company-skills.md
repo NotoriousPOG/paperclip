@@ -264,3 +264,4 @@ curl -sS -X POST "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/agents"
   - `POST /api/companies/:companyId/exports/preview`
   - `POST /api/companies/:companyId/exports`
 - Use skill-only import when the task is specifically to add a skill to the company library without importing the surrounding company/team/package structure.
+- If the server runs NVIDIA SkillSpector, an import, catalog install, or project scan can return `"held": true` with an `inspections` array. Held skills were **not** added. Do not retry with `acceptInspection`: agents cannot override a hold (the server returns `403`). Report the held skill and its findings to the board in your issue comment and let a board user decide.

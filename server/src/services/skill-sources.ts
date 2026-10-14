@@ -7,18 +7,21 @@ import { promises as fs } from 'node:fs';
 import { folderService } from './folders.js';
 import { and, eq, isNull, lt, or, sql } from 'drizzle-orm';
 import { companySkillSources as sources, companySkillSourceEntries as entries, companySkills, companySkillRepositorySnapshots, projectSkillSources, projects, type Db, authUsers } from '@paperclipai/db';
-import type { CompanySkill, SkillSource, SkillSourceCreateRequest, SkillSourceDiscoveryRequest, SkillSourceSelectionRequest, SkillSourceRefreshResult, SkillSourcePreviewRequest, SkillSourceSettingsRequest, SkillSourceDisconnectRequest, SkillSourceDisconnectResult } from '@paperclipai/shared';
+import type { CompanySkill, CompanySkillImportResult, SkillSource, SkillSourceCreateRequest, SkillSourceDiscoveryRequest, SkillSourceSelectionRequest, SkillSourceRefreshResult, SkillSourcePreviewRequest, SkillSourceSettingsRequest, SkillSourceDisconnectRequest, SkillSourceDisconnectResult } from '@paperclipai/shared';
 import { normalizeAgentUrlKey } from '@paperclipai/shared';
-import { conflict, notFound, unprocessable } from '../errors.js';
+import { conflict, forbidden, notFound, unprocessable } from '../errors.js';
 import { companySkillService, parseSkillImportSourceInput } from './company-skills.js';
 import { scanGitHubSkillsWithPackageFallback as scanGitHubSkills, rejectIncompleteSkillPackages, previewGitHubSkillFile, type GitHubRead, type ScannedSkillSource, type SkillScanOptions } from './github-skill-source.js';
 import { skillAccessService } from './skill-access.js';
 import { skillSnapshotHash } from './skill-snapshot.js';
+import { blockingInspectionSummary, inspectSkillSource } from './skill-source-inspection.js';
 
 type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
 type SourceRow = typeof sources.$inferSelect;
 export type SkillSourceContext = {
   actor: { type: 'user' | 'agent' | 'system'; userId?: string | null; agentId?: string | null };
+  /** Derived by the authenticated board route; never saved for unattended refresh. */
+  acceptInspection?: boolean;
   setup?: { userId: string | null; agentId?: string | null; localTrusted: boolean; grantId?: string | null };
   projectBindingId?: string;
   projectBindingLeaseToken?: string;
@@ -31,6 +34,19 @@ const scope = (companyId: string, id: string) => and(eq(sources.companyId, compa
 
 export function skillSourceService(db: Db) {
   const skills = companySkillService(db);
+  async function reviewPublication(companyId: string, id: string, scan: ScannedSkillSource, selectedPaths: string[], context: SkillSourceContext) {
+    if (context.acceptInspection && context.actor.type !== 'user') {
+      throw forbidden('Only board users can accept held skill changes.', { code: 'skill_inspection_override_denied' });
+    }
+    const inspections = await inspectSkillSource(scan, selectedPaths);
+    const blocking = blockingInspectionSummary(inspections);
+    if (blocking.length && !context.acceptInspection) {
+      await db.transaction(tx => context.audit(tx, id, 'company.skill_inspection_held', { commit: scan.commitSha, inspections: blocking }));
+      context.publishCommittedActivity?.();
+      throw conflict('SkillSpector held this change. Installed skills were kept.', { code: 'skill_inspection_held', held: true, inspections });
+    }
+    return blocking;
+  }
   async function row(companyId: string, id: string, database: Db | Tx = db) {
     const [source] = await database.select().from(sources).where(scope(companyId, id));
     if (!source || source.removedAt) throw notFound('Skill source not found.');
@@ -200,6 +216,7 @@ export function skillSourceService(db: Db) {
       await context.authorize('skills.import', { sourceType: 'git', sourceLocator: scan.repositoryUrl,
         skillKey: newSkillKey(scan, candidate.path, candidate.name, id) });
     }
+    const acceptedInspections = await reviewPublication(companyId, id, scan, input.selectedPaths, context);
     const published = await db.transaction(async tx => {
       const [source] = await tx.insert(sources).values({ id, companyId, repositoryId: scan.repositoryId, repositoryUrl: scan.repositoryUrl, fullName: scan.fullName,
         packageMode: scan.packageMode ?? 'skills', trackingRef: context.projectBindingId && input.trackingRef === 'HEAD' ? 'HEAD' : scan.trackingRef, connectionId: scan.connectionId ?? input.connectionId ?? null, lastAttemptAt: new Date(),
@@ -212,6 +229,7 @@ export function skillSourceService(db: Db) {
         await tx.update(projectSkillSources).set({ sourceId: source.id, status: 'ready', lastError: null }).where(eq(projectSkillSources.id, binding.id));
       }
       const result = await publish(tx, source, scan, input.selectedPaths, input.excludedFolders ?? [], context, true);
+      if (acceptedInspections.length) await context.audit(tx, id, 'company.skill_inspection_accepted', { commit: scan.commitSha, inspections: acceptedInspections });
       return { ...result, source: await detail(companyId, id, tx) };
     });
     context.publishCommittedActivity?.();
@@ -277,10 +295,12 @@ export function skillSourceService(db: Db) {
         }
       }
       await authorizeScan(source, scan, selectedPaths, context);
+      const acceptedInspections = await reviewPublication(companyId, id, scan, selectedPaths, context);
       const published = await db.transaction(async tx => {
         const [locked] = await tx.select().from(sources).where(scope(companyId, id)).for('update');
         if (!locked || locked.leaseToken !== token || locked.revision !== source.revision || locked.leaseExpiresAt! < new Date()) throw conflict('Source refresh expired or changed. Try again.');
         const result = await publish(tx, locked, scan, selectedPaths, selection?.excludedFolders ?? source.excludedFolders, context, Boolean(selection));
+        if (acceptedInspections.length) await context.audit(tx, id, 'company.skill_inspection_accepted', { commit: scan.commitSha, inspections: acceptedInspections });
         if (selection || scan.connectionId !== undefined) await tx.update(sources).set({ ...(selection ? { enabled: true } : {}), connectionId: scan.connectionId ?? connectionId,
           ...(source.refreshGrantId === null && reader.grantId ? { refreshGrantId: reader.grantId } : {}),
           ...(selection?.connectionId !== undefined || (!source.refreshUserId && !source.refreshLocalTrusted && context.setup) ? { refreshUserId: context.setup?.userId, refreshAgentId: context.setup?.agentId ?? null, refreshLocalTrusted: context.setup?.localTrusted ?? false, refreshGrantId: reader.grantId ?? null } : {}) }).where(scope(companyId, id));
@@ -391,7 +411,7 @@ export function skillSourceService(db: Db) {
       throw error;
     }
   }
-  async function importFromUrl(companyId: string, input: string, context: SkillSourceContext) {
+  async function importFromUrl(companyId: string, input: string, context: SkillSourceContext, review?: { acceptInspection: boolean }): Promise<CompanySkillImportResult> {
     const parsed = parseSkillImportSourceInput(input);
     const url = new URL(parsed.resolvedSource);
     const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
@@ -429,11 +449,17 @@ export function skillSourceService(db: Db) {
       (!parsed.requestedSkillSlug || normalizeAgentUrlKey(candidate.name) === parsed.requestedSkillSlug || candidate.path.split('/').at(-2) === parsed.requestedSkillSlug)
     ).map(candidate => candidate.path);
     if (!selectedPaths.length) throw unprocessable('No matching SKILL.md files were found in this repository.');
+    // Inspect the downloaded files before anything is persisted, so a held import leaves no source or skill behind.
+    const inspections = review ? await inspectSkillSource(scan, selectedPaths) : [];
+    if (review && !review.acceptInspection && inspections.some(inspection => inspection.blocking)) {
+      return { imported: [], warnings: [], held: true, inspections };
+    }
+    const reviewedContext = { ...context, acceptInspection: review?.acceptInspection ?? context.acceptInspection };
     const result = existing
-      ? await refresh(companyId, existing.id, context, { revision: existing.revision, selectedPaths: [...new Set([...existing.entries.filter(entry => entry.selection === 'selected').map(entry => entry.path), ...selectedPaths])], excludedFolders: existing.excludedFolders }, scan)
-      : await create(companyId, { repositoryUrl: scan.repositoryUrl, trackingRef: scan.trackingRef, commitSha: scan.commitSha, connectionId, selectedPaths }, context, scan);
+      ? await refresh(companyId, existing.id, reviewedContext, { revision: existing.revision, selectedPaths: [...new Set([...existing.entries.filter(entry => entry.selection === 'selected').map(entry => entry.path), ...selectedPaths])], excludedFolders: existing.excludedFolders }, scan)
+      : await create(companyId, { repositoryUrl: scan.repositoryUrl, trackingRef: scan.trackingRef, commitSha: scan.commitSha, connectionId, selectedPaths }, reviewedContext, scan);
     const imported = await Promise.all(result.source.entries.filter(entry => selectedPaths.includes(entry.path) && entry.skillId && !entry.error).map(entry => skills.getById(companyId, entry.skillId!)));
-    return { imported: imported.filter((skill): skill is CompanySkill => Boolean(skill)), warnings: result.warnings };
+    return { imported: imported.filter((skill): skill is CompanySkill => Boolean(skill)), warnings: result.warnings, ...(review ? { held: false, inspections } : {}) };
   }
   return { list, detail, sourceForSkill, discover, preview, create, refresh, settings, disconnect, importFromUrl };
 }

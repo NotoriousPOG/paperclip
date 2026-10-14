@@ -304,6 +304,7 @@ export function skillSourceSyncService(db: Db, options: { context?: (setup: Setu
       }
     }
     return sources.refresh(companyId, sourceId, { ...setup, actor: initiator.actor,
+      acceptInspection: initiator.acceptInspection,
       publishCommittedActivity: initiator.publishCommittedActivity,
       authorize: async (action, resource) => { await initiator.authorize(action, resource); await setup.authorize(action, resource); },
       audit: async (tx, id, action, details) => initiator.audit(tx, id, action, { ...details, refreshUserId: source.refreshUserId }),

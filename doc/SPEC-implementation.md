@@ -1017,6 +1017,16 @@ For avoidance of doubt:
 
 ### Canonical actions and resources
 
+Optional SkillSpector inspection adds a content review gate when configured by
+the operator. It runs before publishing imported skills, source selections and
+manual/automatic refreshes, including complete repository dependencies and
+workspace refreshes. Scanner failures and non-SAFE results hold the change.
+Only an authenticated board actor may accept a scanner hold for the current
+operation; unattended refresh cannot retain that authority. Acceptance cannot
+waive platform safety failures or company policy. This content gate does not
+provide runner isolation or change resource authorization. See `doc/CLI.md` for
+configuration and response details.
+
 The version 1 evaluator uses these stable action identifiers:
 
 - `skills.create`: create or fork a company-authored skill and create skill versions

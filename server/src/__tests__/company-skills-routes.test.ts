@@ -724,7 +724,107 @@ describe("company skill mutation permissions", () => {
     expect(res.body).toEqual({
       imported: [],
       warnings: [],
+      held: false,
+      inspections: [],
     });
+  });
+
+  it("returns held imports with their inspections and logs the hold", async () => {
+    const blocking = {
+      skillId: "risky",
+      skillName: "Risky",
+      status: "findings",
+      recommendation: "DO_NOT_INSTALL",
+      blocking: true,
+      score: 51,
+      severity: "HIGH",
+      findings: [{ ruleId: "SC2", severity: "HIGH", title: "External Script Fetching", detail: "Pipes curl to bash.", path: "SKILL.md", line: 5 }],
+      message: null,
+    };
+    mockCompanySkillService.importFromSource.mockResolvedValueOnce({
+      imported: [],
+      warnings: [],
+      held: true,
+      inspections: [blocking],
+    });
+
+    const res = await request(await createApp({
+      type: "board",
+      userId: "local-board",
+      companyIds: ["company-1"],
+      source: "local_implicit",
+      isInstanceAdmin: false,
+    }))
+      .post("/api/companies/company-1/skills/import")
+      .send({ source: "https://packages.example.com/risky/SKILL.md" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toEqual({ imported: [], warnings: [], held: true, inspections: [blocking] });
+    expect(mockCompanySkillService.importFromSource).toHaveBeenCalledWith(
+      "company-1",
+      "https://packages.example.com/risky/SKILL.md",
+      { review: true, acceptInspection: false },
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      action: "company.skill_inspection_held",
+      details: expect.objectContaining({
+        inspections: [expect.objectContaining({ skill: "Risky", recommendation: "DO_NOT_INSTALL", ruleIds: ["SC2"] })],
+      }),
+    }));
+  });
+
+  it("logs board overrides of held inspections", async () => {
+    mockCompanySkillService.importFromSource.mockResolvedValueOnce({
+      imported: [],
+      warnings: [],
+      held: false,
+      inspections: [{
+        skillId: "risky",
+        skillName: "Risky",
+        status: "error",
+        recommendation: null,
+        blocking: true,
+        score: null,
+        severity: null,
+        findings: [],
+        message: "SkillSpector could not finish the scan.",
+      }],
+    });
+
+    const res = await request(await createApp({
+      type: "board",
+      userId: "local-board",
+      companyIds: ["company-1"],
+      source: "local_implicit",
+      isInstanceAdmin: false,
+    }))
+      .post("/api/companies/company-1/skills/import")
+      .send({ source: "https://packages.example.com/risky/SKILL.md", acceptInspection: true });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockCompanySkillService.importFromSource).toHaveBeenCalledWith(
+      "company-1",
+      "https://packages.example.com/risky/SKILL.md",
+      { review: true, acceptInspection: true },
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      action: "company.skill_inspection_accepted",
+    }));
+  });
+
+  it("does not let agents override held inspections", async () => {
+    const res = await request(await createApp({
+      type: "agent",
+      agentId: "55555555-5555-4555-8555-555555555555",
+      companyId: "company-1",
+      runId: "run-1",
+    }))
+      .post("/api/companies/company-1/skills/import")
+      .send({ source: "https://packages.example.com/risky/SKILL.md", acceptInspection: true });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body).toEqual(expect.objectContaining({ code: "skill_inspection_override_denied" }));
+    expect(mockCompanySkillService.importFromSource).not.toHaveBeenCalled();
   });
 
   it("forwards preview and selective scan-projects requests through the existing skill mutation gate", async () => {
@@ -761,6 +861,8 @@ describe("company skill mutation permissions", () => {
     expect(mockCompanySkillService.scanProjectWorkspaces).toHaveBeenCalledWith("company-1", {
       mode: "preview",
       workspaceIds: [workspaceId],
+      acceptInspection: false,
+      review: true,
     });
 
     const selective = await request(app)
@@ -775,6 +877,8 @@ describe("company skill mutation permissions", () => {
       mode: "import",
       workspaceIds: [workspaceId],
       selection: [{ workspaceId, path: ".codex/skills/review", slug: "review-project" }],
+      acceptInspection: false,
+      review: true,
     });
     expect(mockAccessService.decide).toHaveBeenCalledWith(expect.objectContaining({
       action: "skill_config:update",
@@ -1194,6 +1298,8 @@ describe("company skill mutation permissions", () => {
     expect(mockCompanySkillService.installFromCatalog).toHaveBeenCalledWith("company-1", {
       catalogSkillId: "paperclipai:bundled:software-development:review",
       slug: "review",
+      acceptInspection: false,
+      review: true,
     });
     expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       companyId: "company-1",
@@ -1255,7 +1361,7 @@ describe("company skill mutation permissions", () => {
       .send({ source: "https://github.com/acme/public-skills" });
     expect(response.status, JSON.stringify(response.body)).toBe(201);
     expect(mockSkillSourceService.importFromUrl).toHaveBeenCalledWith("company-1", expect.anything(),
-      expect.objectContaining({ setup: { userId: null, agentId: agent.agentId, localTrusted: false } }));
+      expect.objectContaining({ setup: { userId: null, agentId: agent.agentId, localTrusted: false } }), { acceptInspection: false });
   });
 
   it("derives refresh authority from the authenticated run instead of caller responsibility", async () => {
@@ -1266,7 +1372,7 @@ describe("company skill mutation permissions", () => {
     expect(response.status, JSON.stringify(response.body)).toBe(201);
     expect(mockCaptureRunIdentity).toHaveBeenCalledWith(expect.anything(), { companyId: "company-1", agentId: agent.agentId, runId: "run-1" });
     expect(mockSkillSourceService.importFromUrl).toHaveBeenCalledWith("company-1", expect.anything(),
-      expect.objectContaining({ setup: { userId: "validated-owner", agentId: agent.agentId, localTrusted: false } }));
+      expect.objectContaining({ setup: { userId: "validated-owner", agentId: agent.agentId, localTrusted: false } }), { acceptInspection: false });
   });
 
   it("rejects a run-authenticated import without a run identity", async () => {

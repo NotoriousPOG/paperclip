@@ -275,12 +275,14 @@ export const companySkillResetSchema = z.object({
 
 export const companySkillImportSchema = z.object({
   source: z.string().min(1),
+  acceptInspection: z.boolean().optional(),
 });
 
 export const companySkillProjectScanRequestSchema = z.object({
   projectIds: z.array(z.string().guid()).optional(),
   workspaceIds: z.array(z.string().guid()).optional(),
   mode: z.enum(["import", "preview"]).optional(),
+  acceptInspection: z.boolean().optional(),
   selection: z.array(z.object({
     workspaceId: z.string().guid(),
     path: z.string().min(1),
@@ -589,6 +591,7 @@ export const companySkillInstallCatalogSchema = z.object({
   catalogSkillId: z.string().min(1),
   slug: z.string().min(1).nullable().optional(),
   force: z.boolean().optional(),
+  acceptInspection: z.boolean().optional(),
 });
 
 export const companySkillInstallCatalogResultSchema = z.object({

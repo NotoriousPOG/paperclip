@@ -31,6 +31,8 @@ import { normalizeAgentUrlKey } from "@paperclipai/shared";
 import { Link } from "@/lib/router";
 import { ApiError } from "../../api/client";
 import { companySkillsApi } from "../../api/companySkills";
+import { SkillInspectionDialog } from "./SkillInspectionDialog";
+import { useSkillInspectionHold } from "./useSkillInspectionHold";
 import { projectsApi } from "../../api/projects";
 import { useToastActions } from "../../context/ToastContext";
 import { queryKeys } from "../../lib/queryKeys";
@@ -293,6 +295,7 @@ export function ImportSkillsFromProjectDialog({
   const [selection, setSelection] = useState<Map<string, SkillSelection>>(new Map());
   const [importResult, setImportResult] = useState<CompanySkillProjectScanResult | null>(null);
   const [browseOpen, setBrowseOpen] = useState(false);
+  const inspectionHold = useSkillInspectionHold();
   const [browseAddingKey, setBrowseAddingKey] = useState<string | null>(null);
   const scanTokenRef = useRef(0);
 
@@ -349,16 +352,25 @@ export function ImportSkillsFromProjectDialog({
   }
 
   const importMutation = useMutation({
-    mutationFn: () => {
+    mutationFn: (acceptInspection?: boolean) => {
       if (!selectedProject) throw new Error("No project selected.");
       const selectionInput = Array.from(selection.values());
       return companySkillsApi.scanProjects(companyId, {
         projectIds: [selectedProject.id],
         mode: "import",
         selection: selectionInput,
+        ...(acceptInspection ? { acceptInspection: true } : {}),
       });
     },
-    onSuccess: async (result) => {
+    onSuccess: async (result, acceptInspection) => {
+      if (inspectionHold.review(result, () => importMutation.mutate(true), acceptInspection === true)) {
+        if (result.imported.length > 0) {
+          await queryClient.invalidateQueries({
+            queryKey: queryKeys.companySkills.list(companyId),
+          });
+        }
+        return;
+      }
       setImportResult(result);
       setStep("result");
       await queryClient.invalidateQueries({
@@ -498,6 +510,7 @@ export function ImportSkillsFromProjectDialog({
   }
 
   return (
+    <>
     <Dialog
       open={open}
       onOpenChange={(next) => {
@@ -636,6 +649,8 @@ export function ImportSkillsFromProjectDialog({
         </footer>
       </DialogContent>
     </Dialog>
+    <SkillInspectionDialog {...inspectionHold.dialogProps(importMutation.isPending)} />
+    </>
   );
 }
 

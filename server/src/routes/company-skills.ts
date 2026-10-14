@@ -1,3 +1,4 @@
+import type { CompanySkillInspection } from "@paperclipai/shared";
 import { projectSkillSetupIdentity } from "../services/project-skill-source-bindings.js";
 import { adoptProjectSkillRepository, projectSkillRepositories, skillSourceSyncService } from "../services/skill-source-sync.js";
 import { skillAccessRequestContext, skillAccessService } from "../services/skill-access.js";
@@ -116,6 +117,51 @@ export function companySkillRoutes(db: Db) {
   const access = accessService(db);
   const svc = companySkillService(db);
   const sourceSvc = skillSourceService(db);
+
+  /** Accepting blocking SkillSpector findings is a governed override, so only board users may do it. */
+  function readAcceptInspection(req: Request): boolean {
+    if (req.body?.acceptInspection !== true) return false;
+    if (req.actor.type !== "board") {
+      throw forbidden("Only board users can install a skill that SkillSpector held.", { code: "skill_inspection_override_denied" });
+    }
+    return true;
+  }
+
+  function inspectionSummary(inspections: CompanySkillInspection[] | undefined) {
+    return (inspections ?? [])
+      .filter((inspection) => inspection.blocking)
+      .map((inspection) => ({
+        skill: inspection.skillName,
+        status: inspection.status,
+        recommendation: inspection.recommendation,
+        score: inspection.score,
+        ruleIds: [...new Set(inspection.findings.map((finding) => finding.ruleId))],
+      }));
+  }
+
+  async function logInspectionDecision(
+    req: Request,
+    companyId: string,
+    decision: "held" | "accepted",
+    source: Record<string, unknown>,
+    inspections: CompanySkillInspection[] | undefined,
+  ) {
+    const blocking = inspectionSummary(inspections);
+    if (blocking.length === 0) return;
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      agentApiKeyId: actor.agentApiKeyId,
+      action: decision === "held" ? "company.skill_inspection_held" : "company.skill_inspection_accepted",
+      entityType: "company",
+      entityId: companyId,
+      details: { ...source, inspections: blocking },
+    });
+  }
   const sourceSync = skillSourceSyncService(db);
   const issues = issueService(db);
   const heartbeat = heartbeatService(db);
@@ -320,6 +366,7 @@ export function companySkillRoutes(db: Db) {
     const setup = await projectSkillSetupIdentity(db, companyId, req.actor);
     const result = await operation({
       actor: skillActor(req),
+      acceptInspection: readAcceptInspection(req),
       setup: { userId: setup.refreshUserId, agentId: setup.refreshAgentId, localTrusted: setup.refreshLocalTrusted },
       read: connectionId => skillSourceGitHubReader(db, companyId, req.actor, connectionId),
       authorize: (action, resource) => assertCanMutateCompanySkills(req, companyId, action, resource),
@@ -327,6 +374,7 @@ export function companySkillRoutes(db: Db) {
         const { publication } = await persistActivity(tx as unknown as Db, { ...actor, companyId, action, entityType: "company_skill_source", entityId: sourceId, details });
         publications.push(publication);
       },
+      publishCommittedActivity: () => publications.splice(0).forEach(publishActivity),
     });
     publications.forEach(publishActivity);
     return result;
@@ -1391,9 +1439,16 @@ export function companySkillRoutes(db: Db) {
       await assertCanMutateCompanySkills(req, companyId, "skills.import", () => skillImportPolicyResource(source));
       const parsed = parseSkillImportSourceInput(source);
       const managedGitHub = !parsed.originalSkillsShUrl && /^https:\/\/github\.com\//.test(parsed.resolvedSource);
+      const acceptInspection = readAcceptInspection(req);
       const result = managedGitHub
-        ? await sourceOperation(req, companyId, context => sourceSvc.importFromUrl(companyId, source, context))
-        : await svc.importFromSource(companyId, source);
+        ? await sourceOperation(req, companyId, context => sourceSvc.importFromUrl(companyId, source, context, { acceptInspection }))
+        : await svc.importFromSource(companyId, source, { review: true, acceptInspection });
+      if (result.held) {
+        await logInspectionDecision(req, companyId, "held", { source }, result.inspections);
+        res.status(200).json(result);
+        return;
+      }
+      if (acceptInspection) await logInspectionDecision(req, companyId, "accepted", { source }, result.inspections);
 
       const actor = getActorInfo(req);
       if (!managedGitHub) await logActivity(db, {
@@ -1423,7 +1478,7 @@ export function companySkillRoutes(db: Db) {
         }
       }
 
-      res.status(201).json(result);
+      res.status(201).json({ ...result, held: false, inspections: result.inspections ?? [] });
     },
   );
 
@@ -1436,7 +1491,19 @@ export function companySkillRoutes(db: Db) {
         sourceType: "catalog",
         sourceLocator: req.body.catalogSkillId,
       });
-      const result = await svc.installFromCatalog(companyId, req.body);
+      const acceptInspection = readAcceptInspection(req);
+      const result = await svc.installFromCatalog(companyId, {
+        ...req.body,
+        acceptInspection,
+        review: true,
+      });
+      const decisionSource = { catalogSkillId: req.body.catalogSkillId };
+      if (result.held) {
+        await logInspectionDecision(req, companyId, "held", decisionSource, result.inspections);
+        res.status(200).json(result);
+        return;
+      }
+      if (acceptInspection) await logInspectionDecision(req, companyId, "accepted", decisionSource, result.inspections);
 
       const actor = getActorInfo(req);
       await logActivity(db, {
@@ -1459,7 +1526,7 @@ export function companySkillRoutes(db: Db) {
         },
       });
 
-      res.status(result.action === "created" ? 201 : 200).json(result);
+      res.status(result.action === "created" ? 201 : 200).json({ ...result, held: false, inspections: result.inspections ?? [] });
     },
   );
 
@@ -1480,7 +1547,12 @@ export function companySkillRoutes(db: Db) {
     async (req, res) => {
       const companyId = req.params.companyId as string;
       await assertCanMutateCompanySkills(req, companyId, "skills.import", { sourceType: "workspace" });
-      const result = await svc.scanProjectWorkspaces(companyId, req.body);
+      const acceptInspection = readAcceptInspection(req);
+      const result = await svc.scanProjectWorkspaces(companyId, {
+        ...req.body,
+        acceptInspection,
+        review: true,
+      });
 
       const actor = getActorInfo(req);
       await logActivity(db, {
@@ -1506,7 +1578,15 @@ export function companySkillRoutes(db: Db) {
         },
       });
 
-      res.json(result);
+      const decisionSource = { projectIds: req.body.projectIds ?? null };
+      if (result.held || acceptInspection) {
+        await logInspectionDecision(req, companyId, result.held ? "held" : "accepted", decisionSource, result.inspections);
+      }
+      res.json({
+        ...result,
+        held: result.held === true,
+        inspections: result.inspections ?? [],
+      });
     },
   );
 
