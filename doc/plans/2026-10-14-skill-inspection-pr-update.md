@@ -61,8 +61,9 @@ must produce a hold.
 - Final review staged admitted local package inventories so an unrelated
   project-root file or symlink cannot enter scanner input. The regression failed
   before this fix and passed afterward.
-- The full repository run is in progress. Five workspace provisioning failures
-  and one heartbeat cancellation failure reproduced on the unchanged base
-  `1e731520b`. The full gate is not claimed green.
+- The full repository run was stopped during its general-server phase after
+  five workspace provisioning failures and one heartbeat cancellation failure.
+  All six reproduced on the unchanged base `1e731520b`. General workspace and
+  serialized phases did not run. The full gate is not claimed green.
 - GitHub Dependency Review reports that the fork does not support the feature;
   remote checks are not claimed green.
