@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { flushSync } from "react-dom";
+import { MemoryRouter } from "react-router-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { INSTANCE_FEATURE_KEYS } from "@paperclipai/shared";
@@ -19,6 +20,10 @@ const mockInstanceSettingsApi = vi.hoisted(() => ({
 
 vi.mock("@/api/instanceSettings", () => ({
   instanceSettingsApi: mockInstanceSettingsApi,
+}));
+
+vi.mock("@/context/CompanyContext", () => ({
+  useCompany: () => ({ selectedCompany: { id: "butter", issuePrefix: "BUT" } }),
 }));
 
 vi.mock("../context/BreadcrumbContext", () => ({
@@ -80,7 +85,11 @@ function defaultExperimentalSettings(): InstanceExperimentalSettingsPayload {
     enableStreamlinedUi: true,
     enableApps: true,
     enableMcpAggregators: true,
+    enablePublicMcp: false,
+    enableOpenAiDot: false,
+    enableGrokBot: false,
     enableChatConnectors: false,
+    enableGitHubReviewBots: false,
     enableMemoryConnectors: false,
     enablePipelines: false,
     enableCases: false,
@@ -96,6 +105,7 @@ function defaultExperimentalSettings(): InstanceExperimentalSettingsPayload {
     enableSummaries: false,
     enableStatusCards: false,
     enableDecisions: false,
+    enableFastResponses: false,
     enableGoalsSidebarLink: false,
     enableServerInfoDebugView: false,
     enablePaperclipDeveloperMode: false,
@@ -166,7 +176,9 @@ describe("InstanceExperimentalSettings — Conference Room Chat card (PAP-11233)
     flushSync(() => {
       root!.render(
         <QueryClientProvider client={queryClient}>
-          <InstanceExperimentalSettings />
+          <MemoryRouter initialEntries={["/BUT/company/settings/instance/experimental"]}>
+            <InstanceExperimentalSettings />
+          </MemoryRouter>
         </QueryClientProvider>,
       );
     });
@@ -247,6 +259,33 @@ describe("InstanceExperimentalSettings — Conference Room Chat card (PAP-11233)
     expect(container.textContent).not.toContain("MCP aggregators");
   });
 
+  it("defaults assistant connections off and persists an explicit toggle in both directions", async () => {
+    await renderPage();
+    const selector = 'button[aria-label="Toggle assistant connections experimental setting"]';
+    expect(container.querySelector(selector)?.getAttribute("aria-checked")).toBe("false");
+    expect(container.textContent).toContain("work already delegated continues");
+    for (const enabled of [true, false]) {
+      await act(() => container.querySelector<HTMLButtonElement>(selector)!.click());
+      await flushReact();
+      expect(mockInstanceSettingsApi.updateExperimental).toHaveBeenLastCalledWith({ enablePublicMcp: enabled });
+      expect(container.querySelector(selector)?.getAttribute("aria-checked")).toBe(String(enabled));
+      expect(Boolean(container.querySelector('a[href="/BUT/apps/assistant-connection"]'))).toBe(enabled);
+    }
+  });
+
+  it("names Dot prerequisites and saves its opt-in independently in both directions", async () => {
+    await renderPage();
+    const selector = 'button[aria-label="Toggle OpenAI Dot experimental setting"]';
+    expect(container.querySelector(selector)?.getAttribute("aria-checked")).toBe("false");
+    expect(container.textContent).toContain("Requires Assistant connections (MCP) and an authenticated instance with a public HTTPS URL");
+    for (const enabled of [true, false]) {
+      await act(() => container.querySelector<HTMLButtonElement>(selector)!.click());
+      await flushReact();
+      expect(mockInstanceSettingsApi.updateExperimental).toHaveBeenLastCalledWith({ enableOpenAiDot: enabled });
+      expect(container.querySelector(selector)?.getAttribute("aria-checked")).toBe(String(enabled));
+    }
+  });
+
   it("defaults chat connectors off and persists an explicit toggle in both directions", async () => {
     await renderPage();
     const selector = 'button[aria-label="Toggle chat connectors experimental setting"]';
@@ -258,6 +297,18 @@ describe("InstanceExperimentalSettings — Conference Room Chat card (PAP-11233)
       expect(mockInstanceSettingsApi.updateExperimental).toHaveBeenLastCalledWith({ enableChatConnectors: enabled });
       expect(container.querySelector(selector)?.getAttribute("aria-checked")).toBe(String(enabled));
       expect(currentExperimentalSettings.enableApps).toBe(true);
+    }
+  });
+
+  it("toggles GitHub review bots without enabling chat connectors", async () => {
+    await renderPage();
+    const selector = 'button[aria-label="Toggle GitHub review bots experimental setting"]';
+    expect(container.querySelector(selector)?.getAttribute("aria-checked")).toBe("false");
+    for (const enabled of [true, false]) {
+      await act(() => container.querySelector<HTMLButtonElement>(selector)!.click());
+      await flushReact();
+      expect(mockInstanceSettingsApi.updateExperimental).toHaveBeenLastCalledWith({ enableGitHubReviewBots: enabled });
+      expect(currentExperimentalSettings.enableChatConnectors).toBe(false);
     }
   });
 
@@ -420,6 +471,17 @@ describe("InstanceExperimentalSettings — Conference Room Chat card (PAP-11233)
     expect(mockInstanceSettingsApi.updateExperimental).toHaveBeenCalledWith({
       enableDecisions: true,
     });
+    expect(toggle?.getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("renders and patches the fast responses experimental toggle", async () => {
+    await renderPage();
+    expect(container.textContent).toContain("Experimental fast responses");
+    const toggle = container.querySelector<HTMLButtonElement>('[aria-label="Toggle fast responses experimental setting"]');
+    expect(toggle?.getAttribute("aria-checked")).toBe("false");
+    await act(async () => { toggle?.click(); });
+    await flushReact();
+    expect(mockInstanceSettingsApi.updateExperimental).toHaveBeenCalledWith({ enableFastResponses: true });
     expect(toggle?.getAttribute("aria-checked")).toBe("true");
   });
 
@@ -786,7 +848,9 @@ describe("InstanceExperimentalSettings — cloud-managed keys", () => {
     flushSync(() => {
       root!.render(
         <QueryClientProvider client={queryClient}>
-          <InstanceExperimentalSettings />
+          <MemoryRouter initialEntries={["/BUT/company/settings/instance/experimental"]}>
+            <InstanceExperimentalSettings />
+          </MemoryRouter>
         </QueryClientProvider>,
       );
     });
@@ -939,7 +1003,9 @@ describe("InstanceExperimentalSettings — card ordering and headings (PAP-393)"
     flushSync(() => {
       root!.render(
         <QueryClientProvider client={queryClient}>
-          <InstanceExperimentalSettings />
+          <MemoryRouter initialEntries={["/BUT/company/settings/instance/experimental"]}>
+            <InstanceExperimentalSettings />
+          </MemoryRouter>
         </QueryClientProvider>,
       );
     });
@@ -1054,7 +1120,9 @@ describe("InstanceExperimentalSettings — operator-hidden cards", () => {
     flushSync(() => {
       root!.render(
         <QueryClientProvider client={queryClient}>
-          <InstanceExperimentalSettings />
+          <MemoryRouter initialEntries={["/BUT/company/settings/instance/experimental"]}>
+            <InstanceExperimentalSettings />
+          </MemoryRouter>
         </QueryClientProvider>,
       );
     });

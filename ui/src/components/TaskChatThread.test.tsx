@@ -16,6 +16,7 @@ import type {
 } from "@paperclipai/shared";
 import { heartbeatsApi } from "@/api/heartbeats";
 import { nativeRunEventsToTranscript } from "./transcript/native-run-events";
+import { pendingConnectionIntentInteraction } from "@/fixtures/issueThreadInteractionFixtures";
 import type { HeartbeatRunEvent } from "@paperclipai/shared";
 
 const transcriptState = vi.hoisted(() => ({
@@ -1010,6 +1011,54 @@ describe("TaskChatThread runtime transcript selection", () => {
     expect(container.textContent).not.toContain("Workspace restore failed");
   });
 
+  it("directs a missing starting branch to repair instead of offering an unchanged retry", () => {
+    render(<TaskChatThread comments={[]} onAdd={async () => {}} issueStatus="blocked" onRetryFailedRun={vi.fn()} linkedRuns={[{
+      runId: "missing-branch-run", runtimeMode: "legacy", status: "failed", errorCode: "configuration_incomplete",
+      agentId: "agent-1", agentName: "Worker", adapterType: "claude_local",
+      createdAt: "2026-08-25T18:00:00.000Z", startedAt: null, finishedAt: "2026-08-25T18:00:02.000Z",
+      resultJson: { configurationIncomplete: { reason: "workspace_base_ref_unresolved", requestedRef: "main" } },
+    }]} />);
+    expect(container.textContent).toContain("Starting branch unavailable");
+    expect(container.textContent).toContain("Repair the starting branch below before retrying.");
+    expect(container.querySelector('[data-testid="task-chat-run-failed-try-again"]')).toBeNull();
+  });
+
+  it.each(["legacy", "native"] as const)("keeps a %s credential denial expanded and replaces it after a successful attempt", (runtimeMode) => {
+    const denied = {
+      runId: "credential-run", runtimeMode, status: "failed", errorCode: "configuration_incomplete",
+      agentId: "agent-1", agentName: "Codie", adapterType: runtimeMode === "native" ? "paperclip_runner" : "codex_local",
+      responsibleUserId: "nicky", createdAt: "2026-08-25T18:00:00Z", startedAt: null, finishedAt: "2026-08-25T18:00:02Z",
+      resultJson: { configurationIncomplete: { selectionFailure: "ai_connection_credential_not_shared", credentialAccess: { connectionName: "Dotta’s API Key" } } },
+    };
+    const props = { comments: [], onAdd: async () => {}, issueStatus: "blocked", currentUserId: "nicky", onRetryFailedRun: vi.fn() };
+    render(<TaskChatThread {...props} linkedRuns={[denied]} />);
+    const alert = container.querySelector('[data-testid="task-chat-credential-access-notice"]');
+    expect(alert?.getAttribute("role")).toBe("alert");
+    expect(alert?.textContent).toContain("Codie is configured to use Dotta’s API Key, but you don’t have access");
+    expect(alert?.querySelector('a[href="/agents/agent-1/runtime"]')).not.toBeNull();
+    expect(alert?.querySelector('a[href*="/runs/credential-run"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="task-chat-run-failed-try-again"]')).toBeNull();
+    render(<TaskChatThread {...props} linkedRuns={[denied, { ...denied, runId: "new-run", status: "succeeded",
+      resultJson: null, errorCode: null, createdAt: "2026-08-25T18:01:00Z", startedAt: "2026-08-25T18:01:00Z", finishedAt: "2026-08-25T18:01:02Z" }]} />);
+    expect(container.querySelector('[data-testid="task-chat-credential-access-notice"]')).toBeNull();
+  });
+
+  it("directs a missing personal AI credential to its card without offering a premature retry", () => {
+    render(<TaskChatThread comments={[]} onAdd={async () => {}} issueStatus="blocked"
+      onRetryFailedRun={vi.fn()} interactions={[{
+        ...pendingConnectionIntentInteraction, sourceRunId: "missing-ai-run",
+        payload: { ...pendingConnectionIntentInteraction.payload, purpose: "ai" },
+      }]} linkedRuns={[{
+        runId: "missing-ai-run", runtimeMode: "legacy", status: "failed", errorCode: "configuration_incomplete",
+        agentId: "agent-1", agentName: "Chief of Staff", adapterType: "claude_local",
+        createdAt: "2026-08-25T18:00:00.000Z", startedAt: null, finishedAt: "2026-08-25T18:00:02.000Z",
+      }]} />);
+    expect(container.textContent).toContain("AI connection needed");
+    expect(container.textContent).toContain("Use the connection card below to continue.");
+    expect(container.textContent).not.toContain("The selected AI account is unavailable");
+    expect(container.querySelector('[data-testid="task-chat-run-failed-try-again"]')).toBeNull();
+  });
+
   it("projects the saved Plan inline at its native write_document boundary", () => {
     planState.data = planDocument({
       updatedAt: new Date("2026-08-25T18:00:02.000Z"),
@@ -1803,6 +1852,32 @@ describe("TaskChatThread runtime transcript selection", () => {
     expect(container.textContent).not.toContain("The runner stopped");
   });
 
+  it.each([
+    "The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.",
+    "The selected model is not supported by the current ChatGPT connection. Choose a supported model or a compatible AI connection.",
+  ])("promotes a rejected model above the runner's generated failure response: %s", (error) => {
+    nativeTranscriptState.transcriptByRun.set("model-rejected", [{
+      kind: "run_result", ts: "2026-08-25T18:00:01.000Z",
+      summary: "The Codex run failed before it completed.",
+      disposition: "needs_review", objectiveSatisfied: false, verification: [],
+      remainingWork: [], blocker: null, artifacts: [],
+    }]);
+    render(<TaskChatThread comments={[]} onAdd={async () => {}} linkedRuns={[{
+      runId: "model-rejected", runtimeMode: "native", status: "failed",
+      errorCode: "native_provider_model_rejected",
+      error,
+      agentId: "agent-1", agentName: "Runner", adapterType: "paperclip_runner",
+      createdAt: "2026-08-25T18:00:00.000Z", startedAt: "2026-08-25T18:00:00.000Z",
+      finishedAt: "2026-08-25T18:00:02.000Z",
+    }]} />);
+    const marker = container.querySelector('[data-testid="task-chat-collapsible-marker"]');
+    expect(marker?.textContent).toContain("Model unavailable");
+    flushSync(() => marker!.querySelector<HTMLButtonElement>('button[aria-expanded="false"]')!.click());
+    expect(container.textContent).toContain(error);
+    expect(container.textContent).toContain("clear the task's model override, then retry");
+    expect(container.textContent).not.toContain("after returning a final response");
+  });
+
   it("keeps workspace contention out of the conversation's cancellation markers", () => {
     render(<TaskChatThread comments={[]} onAdd={async () => {}} linkedRuns={[{
       runId: "workspace-wait", runtimeMode: "native", status: "cancelled", errorCode: "workspace_busy",
@@ -2141,6 +2216,35 @@ describe("TaskChatThread runtime transcript selection", () => {
     expect(turnHeaders[1]?.textContent).toContain(
       "Continued after steering · Worked for",
     );
+  });
+
+  it("keeps a pending native permission answerable after same-turn steering", async () => {
+    const runId = "native-pending-steered";
+    nativeTranscriptState.transcriptByRun.set(runId, [
+      { kind: "runtime_request", ts: "2026-08-25T18:00:01.000Z", requestId: "permission-1",
+        requestKind: "permission_approval", turnId: "provider-turn-1", requestType: "permission", status: "pending",
+        prompt: "Pi write", choices: [{ key: "decline", label: "Deny" }], fields: [] },
+      { kind: "assistant", ts: "2026-08-25T18:00:03.000Z", text: "Steering acknowledged.", channel: "progress" },
+    ]);
+    const resolve = vi.spyOn(heartbeatsApi, "resolveRuntimeRequest").mockResolvedValue({} as never);
+    render(<TaskChatThread comments={[{
+      id: "pending-steering-comment", companyId: "company-1", issueId: "issue-1", authorType: "user",
+      authorAgentId: null, authorUserId: "user-1", body: "Change course.", presentation: null, metadata: null,
+      runId: null, consumedByRunId: runId, steeredIntoRunId: runId,
+      conversationAnchorAt: new Date("2026-08-25T18:00:02.000Z"),
+      createdAt: new Date("2026-08-25T18:00:02.000Z"), updatedAt: new Date("2026-08-25T18:00:02.000Z"),
+    }]} onAdd={async () => {}} issueStatus="in_progress" activeRun={{
+      id: runId, runtimeMode: "native", status: "running", invocationSource: "issue", triggerDetail: null,
+      startedAt: "2026-08-25T18:00:00.000Z", finishedAt: null, createdAt: "2026-08-25T18:00:00.000Z",
+      agentId: "agent-1", agentName: "Runner", adapterType: "paperclip_runner",
+    }} />);
+    const deny = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).filter(button => button.textContent === "Deny");
+    expect(deny).toHaveLength(1);
+    expect(deny[0].disabled).toBe(false);
+    expect(container.textContent).not.toContain("Cancelled");
+    await act(async () => deny[0].click());
+    expect(resolve).toHaveBeenCalledWith({ runId, requestId: "permission-1", turnId: "provider-turn-1",
+      requestKind: "permission_approval", resolution: { action: "decline" } });
   });
 
   it("labels the live tail as a continuation after the steering bubble", () => {
@@ -4553,4 +4657,17 @@ describe("TaskChatThread composer execution controls", () => {
     render(<TaskChatThread comments={[]} onAdd={async () => {}} issueStatus="todo" onCancelRun={vi.fn()} />);
     expect(container.querySelector('[data-testid="task-chat-composer-stop"]')).toBeNull();
   });
+});
+
+it("explains a missing provider runtime with an installation repair", () => {
+  render(<TaskChatThread comments={[]} onAdd={async () => {}} linkedRuns={[{
+    runId: "missing-runtime", runtimeMode: "native", status: "failed", errorCode: "native_provider_runtime_missing",
+    agentId: "agent-1", agentName: "Content Strategist", adapterType: "paperclip_runner",
+    createdAt: "2026-10-11T11:19:08Z", startedAt: "2026-10-11T11:19:08Z", finishedAt: "2026-10-11T11:19:14Z",
+  }]} />);
+  expect(container.textContent).toContain("Runtime missing");
+  const toggle = container.querySelector<HTMLButtonElement>('[data-testid="task-chat-collapsible-marker"] button[aria-expanded]')!;
+  flushSync(() => toggle.click());
+  expect(container.textContent).toContain("Reinstall or rebuild Paperclip");
+  expect(container.textContent).toContain("test the agent's runtime");
 });
