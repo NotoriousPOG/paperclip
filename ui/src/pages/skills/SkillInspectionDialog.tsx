@@ -47,7 +47,7 @@ export function SkillInspectionDialog({
           <DialogTitle>Skill inspection</DialogTitle>
           <DialogDescription>
             {deciding
-              ? "NVIDIA SkillSpector held this install. The skill is not in the library yet."
+              ? "NVIDIA SkillSpector held this change. The new content has not been saved to the library."
               : "NVIDIA SkillSpector reported findings. The skill was added. Read them before assigning it to an agent."}
           </DialogDescription>
         </DialogHeader>

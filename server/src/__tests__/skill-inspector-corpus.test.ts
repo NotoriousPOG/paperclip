@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { inspectSkillDirectory } from "../services/company-skills.js";
 import { resetSkillInspectionCacheForTests } from "../services/skill-inspector.js";
 
@@ -65,6 +65,7 @@ export const SKILL_INSPECTOR_CORPUS: Sample[] = [
 
 describe.skipIf(!bin)("SkillSpector detection corpus", () => {
   it("holds every malicious sample and passes every benign sample", async () => {
+    vi.stubEnv("SKILLSPECTOR_ENABLED", "true");
     resetSkillInspectionCacheForTests();
     const rows = [];
     for (const sample of SKILL_INSPECTOR_CORPUS) {

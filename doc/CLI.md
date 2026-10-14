@@ -684,7 +684,9 @@ When [NVIDIA SkillSpector](https://github.com/NVIDIA/skillspector) is installed 
 the Paperclip server, `skills import`, `skills install`, and `skills scan-projects`
 run a static SkillSpector scan (`--no-llm`) on each new skill before it is saved.
 The server uses `SKILLSPECTOR_BIN` when set, otherwise the first `skillspector` on
-`PATH`. Without SkillSpector, installs behave exactly as before.
+`PATH`. Without SkillSpector, installs behave exactly as before. An operator can
+set `SKILLSPECTOR_ENABLED=false` to disable this optional integration. A configured
+but unavailable scanner holds changes rather than silently skipping inspection.
 
 - The install is held unless SkillSpector rates the skill `SAFE`. A `CAUTION` or
   `DO_NOT_INSTALL` rating, any `HIGH` or `CRITICAL` finding, or a scan that fails to
@@ -696,11 +698,27 @@ The server uses `SKILLSPECTOR_BIN` when set, otherwise the first `skillspector` 
 - A board user can rerun the command with `--accept-inspection` to install anyway.
   Agent API keys cannot accept a held install. Holds and overrides are written to
   the activity log (`company.skill_inspection_held`, `company.skill_inspection_accepted`).
+- The same pre-publication gate applies to source creation, selection, and manual
+  or automatic refresh. Complete repository packages include shared dependency
+  files in the scan. Source holds return `409` with `skill_inspection_held` and
+  structured findings; installed content and versions are retained. Automatic
+  refresh never saves an override. The Sources UI lets a board user review and
+  accept the current change. Workspace scans also check existing skills before
+  updating their stored content.
+- Scanner acceptance cannot waive Paperclip's hard content-safety checks or a
+  company policy denial. Imported scripts are not executed during inspection.
 - The scanner runs with a minimal environment and a 60 second timeout
   (`SKILLSPECTOR_TIMEOUT_MS` overrides it). Its supply-chain rule may send
   dependency names to OSV.
 - URL and skills.sh imports are scanned from the downloaded `SKILL.md`; GitHub,
   local-path, catalog, and project-workspace imports are scanned with all files.
+
+Static inspection can miss malicious instructions and flag legitimate content.
+It is one control against the attacks described in the
+[Snyk ToxicSkills study](https://snyk.io/blog/toxicskills-malicious-ai-agent-skills-clawhub/)
+(2026-02-05). Inspection does not isolate an agent's runtime or grant/restrict its
+resource access. Files edited directly in a local workspace remain mutable;
+holding their library refresh does not undo that filesystem edit.
 
 ### Catalog (app-shipped skills)
 

@@ -50,6 +50,7 @@ function isExecutable(file: string) {
 
 /** `SKILLSPECTOR_BIN` wins; otherwise the first `skillspector` on PATH. Null disables inspection. */
 export function resolveSkillSpectorBin(): string | null {
+  if (process.env.SKILLSPECTOR_ENABLED === "false") return null;
   const fromEnv = process.env.SKILLSPECTOR_BIN?.trim();
   if (fromEnv) return isExecutable(fromEnv) ? fromEnv : null;
   for (const directory of (process.env.PATH ?? "").split(delimiter)) {
@@ -58,6 +59,18 @@ export function resolveSkillSpectorBin(): string | null {
     if (isExecutable(candidate)) return candidate;
   }
   return null;
+}
+
+/** An explicit scanner configuration must not silently disable inspection when broken. */
+export function skillInspectionEnabled(): boolean {
+  if (process.env.SKILLSPECTOR_ENABLED === "false") return false;
+  return Boolean(process.env.SKILLSPECTOR_BIN?.trim() || resolveSkillSpectorBin());
+}
+
+function missingScannerInspection(skillId: string, skillName: string): CompanySkillInspection {
+  return skillInspectionEnabled()
+    ? failedInspection(skillId, skillName, "The configured SkillSpector scanner is unavailable. This change was held.")
+    : unavailableInspection(skillId, skillName);
 }
 
 /**
@@ -98,6 +111,7 @@ export function parseSkillSpectorReport(raw: unknown): ParsedReport | null {
     && RECOMMENDATIONS.has(risk.recommendation as CompanySkillInspectionRecommendation)
     ? risk.recommendation as CompanySkillInspectionRecommendation
     : null;
+  if (recommendation === null) return null;
   const issues = Array.isArray(report.issues) ? report.issues : null;
   if (score === null && issues === null) return null;
   const findings: CompanySkillInspectionFinding[] = [];
@@ -228,7 +242,7 @@ export async function scanSkillDirectory(
   skillDir: string,
 ): Promise<CompanySkillInspection> {
   const bin = resolveSkillSpectorBin();
-  if (!bin) return unavailableInspection(skillId, skillName);
+  if (!bin) return missingScannerInspection(skillId, skillName);
   const cacheKey = await directoryHash(bin, skillDir).catch(() => null);
   const cached = cacheKey ? cache.get(cacheKey) : undefined;
   if (cached) return { ...cached, skillId, skillName };
@@ -238,7 +252,7 @@ export async function scanSkillDirectory(
   try {
     const timeoutMs = scanTimeoutMs();
     const run = await runScan(bin, ["scan", skillDir, "--no-llm", "--format", "json", "--output", output], timeoutMs);
-    if (run.spawnCode === "ENOENT") return unavailableInspection(skillId, skillName);
+    if (run.spawnCode === "ENOENT") return failedInspection(skillId, skillName, "SkillSpector became unavailable before the scan. This change was held.");
     const raw: unknown = await readFile(output, "utf8").then(JSON.parse).catch(() => null);
     const parsed = raw === null ? null : parseSkillSpectorReport(raw);
     if (!parsed) {
@@ -271,7 +285,7 @@ export async function scanSkillFiles(
   skillName: string,
   files: SkillInspectionFile[],
 ): Promise<CompanySkillInspection> {
-  if (!resolveSkillSpectorBin()) return unavailableInspection(skillId, skillName);
+  if (!resolveSkillSpectorBin()) return missingScannerInspection(skillId, skillName);
   const root = await mkdtemp(join(tmpdir(), "skillspector-skill-"));
   try {
     for (const file of files) {

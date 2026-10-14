@@ -51,6 +51,7 @@ describe("skill inspector", () => {
     await writeFile(bin, stub(logDir));
     await chmod(bin, 0o755);
     process.env.SKILLSPECTOR_BIN = bin;
+    process.env.SKILLSPECTOR_ENABLED = "true";
     process.env.PAPERCLIP_TEST_SECRET = "do-not-leak";
     resetSkillInspectionCacheForTests();
   });
@@ -72,10 +73,24 @@ describe("skill inspector", () => {
   }
 
   it("is unavailable and non-blocking when the scanner is not installed", async () => {
-    process.env.SKILLSPECTOR_BIN = path.join(root, "missing");
+    delete process.env.SKILLSPECTOR_BIN;
+    process.env.PATH = logDir;
     expect(resolveSkillSpectorBin()).toBeNull();
     const result = await scanSkillDirectory("s", "S", await skillDir("plain", "Hello."));
     expect(result).toMatchObject({ status: "unavailable", blocking: false });
+  });
+
+  it("holds changes when an explicitly configured scanner is unavailable", async () => {
+    process.env.SKILLSPECTOR_BIN = path.join(root, "missing");
+    const result = await scanSkillDirectory("s", "S", await skillDir("plain", "Hello."));
+    expect(result).toMatchObject({ status: "error", blocking: true });
+    expect(result.message).toContain("configured");
+  });
+
+  it("permits an operator to explicitly disable the optional scanner", async () => {
+    process.env.SKILLSPECTOR_ENABLED = "false";
+    expect(await scanSkillDirectory("s", "S", await skillDir("plain", "Hello.")))
+      .toMatchObject({ status: "unavailable", blocking: false });
   });
 
   it("blocks DO_NOT_INSTALL reports and orders findings by severity", async () => {
@@ -113,6 +128,7 @@ describe("skill inspector", () => {
   it("treats unreadable reports as blocking errors", () => {
     expect(parseSkillSpectorReport({ execution_successful: false })).toBeNull();
     expect(parseSkillSpectorReport({})).toBeNull();
+    expect(parseSkillSpectorReport({ issues: [], risk_assessment: { score: 0 } })).toBeNull();
     expect(inspectionBlocks({ status: "error", recommendation: null, score: null, findings: [] })).toBe(true);
     expect(inspectionBlocks({ status: "findings", recommendation: "CAUTION", score: 22, findings: [] })).toBe(true);
     expect(inspectionBlocks({ status: "findings", recommendation: "SAFE", score: 5, findings: [] })).toBe(false);

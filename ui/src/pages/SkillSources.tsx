@@ -23,6 +23,8 @@ import { SkillImportProgress, type FoundSkill } from './skills/SkillImportProgre
 import { SkillPackagePreview } from './skills/SkillPackagePreview';
 import { SkillSourceTree, type SkillTreeCandidate } from './skills/SkillSourceTree';
 import { SkillImportWarnings, skillImportWarnings } from './skills/SkillImportWarnings';
+import { SkillInspectionDialog } from './skills/SkillInspectionDialog';
+import { useSkillInspectionHold } from './skills/useSkillInspectionHold';
 import { timeAgo } from '@/lib/timeAgo';
 import { skillRoute } from '@/lib/company-skill-routes';
 import { consumeSkillSourceReturn, rememberSkillSourceReturn } from '@/lib/skill-source-connect-return';
@@ -30,6 +32,7 @@ import { groupProjectSkillRepositories } from '@/lib/project-skill-repositories'
 
 const sourceKey = (companyId: string) => queryKeys.skillSources.all(companyId);
 export function SkillSources() {
+  const inspectionHold = useSkillInspectionHold();
   const sourceActionButtons = useRef<Record<string, HTMLButtonElement | null>>({});
   const { selectedCompanyId, selectedCompany } = useCompany();
   const { sourceId } = useParams<{ sourceId: string }>();
@@ -47,9 +50,13 @@ export function SkillSources() {
   async function invalidate() {
     await Promise.all([client.invalidateQueries({ queryKey: queryKeys.skillSources.projects(companyId) }), client.invalidateQueries({ queryKey: sourceKey(companyId) }), client.invalidateQueries({ queryKey: queryKeys.companySkills.list(companyId) })]);
   }
-  const refresh = useMutation({ mutationFn: (id: string) => skillSourcesApi.refresh(companyId, id), onSuccess: async result => {
+  const refresh = useMutation({ mutationFn: ({ id, acceptInspection = false }: { id: string; acceptInspection?: boolean }) => skillSourcesApi.refresh(companyId, id, acceptInspection), onSuccess: async result => {
+    inspectionHold.review({}, () => {}, true);
     setResults(prev => ({ ...prev, [result.source.id]: null })); await invalidate();
-  }, onError: (error, id) => { setResults(prev => ({ ...prev, [id]: { message: error.message, failedAt: Date.now(), operation: 'refresh' } })); void invalidate(); } });
+  }, onError: (error, variables) => {
+    if (inspectionHold.reviewError(error, () => refresh.mutate({ ...variables, acceptInspection: true }))) return;
+    setResults(prev => ({ ...prev, [variables.id]: { message: error.message, failedAt: Date.now(), operation: 'refresh' } })); void invalidate();
+  } });
   const adopt = useMutation({ mutationFn: async (group: ReturnType<typeof groupProjectSkillRepositories>[number]) => {
     for (const workspace of group.importableWorkspaces) await skillSourcesApi.adoptProject(companyId, workspace.workspaceId);
   }, onSuccess: invalidate, onError: () => { void invalidate(); } });
@@ -115,12 +122,12 @@ export function SkillSources() {
               {source.enabled && source.automaticUpdates === false && <p className="text-xs text-muted-foreground">Automatic updates paused</p>}
               {source.trackingActive === false && <p className="text-xs text-muted-foreground">Repository tracking stopped · installed skills kept</p>}
               {!source.enabled && <p className="text-xs text-muted-foreground">Disconnected</p>}
-              {refresh.isPending && refresh.variables === source.id && <p role="status" className="text-xs text-muted-foreground">Refreshing…</p>}
+              {refresh.isPending && refresh.variables.id === source.id && <p role="status" className="text-xs text-muted-foreground">Refreshing…</p>}
               {newCount > 0 && <Link to={`/skills/sources/${source.id}`} className="text-xs underline">{newCount} new {newCount === 1 ? 'skill' : 'skills'} available</Link>}
             </div></div>
             <SkillSourceSyncControls showPreference={false} automaticUpdates={source.automaticUpdates ?? true}
-              refreshing={source.syncState === 'refreshing' || (refresh.isPending && refresh.variables === source.id)}
-              disabled={!source.enabled || settings.isPending} onRefresh={() => refresh.mutate(source.id)}
+              refreshing={source.syncState === 'refreshing' || (refresh.isPending && refresh.variables.id === source.id)}
+              disabled={!source.enabled || settings.isPending} onRefresh={() => refresh.mutate({ id: source.id })}
               onAutomaticUpdates={enabled => settings.mutate({ source, enabled })} />
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -175,6 +182,7 @@ export function SkillSources() {
       setResults(prev => ({ ...prev, [result.source.id]: null })); await invalidate(); navigate('/skills/sources');
     }} />}
     {sourceId && sourceId !== 'new' && query.isSuccess && !activeSource && <p role="alert" className="text-sm text-destructive">Source not found.</p>}
+    <SkillInspectionDialog {...inspectionHold.dialogProps(refresh.isPending)} />
   </div>;
 }
 
@@ -265,10 +273,12 @@ function SourceDialog({ companyId, source, onClose, onSaved }: {
     setDiscovery(result.discovery); setPackageMode(result.discovery.packageMode ?? packageMode); setConnectionId(result.connectionId);
     if (!source) { setSelected(new Set(result.discovery.candidates.map(candidate => candidate.path))); setExcludedFolders([]); }
   } });
-  const save = useMutation({ mutationFn: () => source
-    ? skillSourcesApi.select(companyId, source.id, { revision: selectionRevision!, packageMode, selectedPaths: [...selected], excludedFolders, connectionId: sourceConnectionId })
-    : skillSourcesApi.create(companyId, { repositoryUrl: discovery!.repositoryUrl, trackingRef: discovery!.trackingRef, commitSha: discovery!.commitSha, packageMode, connectionId, selectedPaths: [...selected], excludedFolders }),
-    onSuccess: async result => { sessionStorage.removeItem(draftKey); await onSaved(result); },
+  const saveInspectionHold = useSkillInspectionHold();
+  const save = useMutation<SkillSourceRefreshResult, Error, boolean>({ mutationFn: acceptInspection => source
+    ? skillSourcesApi.select(companyId, source.id, { revision: selectionRevision!, packageMode, selectedPaths: [...selected], excludedFolders, connectionId: sourceConnectionId, ...(acceptInspection ? { acceptInspection: true } : {}) })
+    : skillSourcesApi.create(companyId, { repositoryUrl: discovery!.repositoryUrl, trackingRef: discovery!.trackingRef, commitSha: discovery!.commitSha, packageMode, connectionId, selectedPaths: [...selected], excludedFolders, ...(acceptInspection ? { acceptInspection: true } : {}) }),
+    onSuccess: async result => { saveInspectionHold.review({}, () => {}, true); sessionStorage.removeItem(draftKey); await onSaved(result); },
+    onError: error => { saveInspectionHold.reviewError(error, () => save.mutate(true)); },
   });
   const candidates: SkillTreeCandidate[] = discovery?.candidates ?? (source ? source.entries.map(entry => ({ ...entry,
     note: !entry.present ? 'Removed from source · installed copy retained' : entry.selection === 'new' ? 'New skill' : entry.skillId ? 'Already imported' : undefined,
@@ -340,19 +350,20 @@ function SourceDialog({ companyId, source, onClose, onSaved }: {
         {selectionTree}
         <SkillImportWarnings warnings={warnings} />
       </div>}
-      {error && <p role="alert" className="text-sm text-destructive">{error.message}{' '}<Link onClick={rememberReturn} to={connectHref} className="underline">Connect a GitHub account</Link></p>}
+      {error && !saveInspectionHold.dialogProps(false).deciding && <p role="alert" className="text-sm text-destructive">{error.message}{' '}<Link onClick={rememberReturn} to={connectHref} className="underline">Connect a GitHub account</Link></p>}
       {scan.isPending && <SkillImportProgress repository={parsedRepository?.fullName ?? repositoryUrl} progress={progress} found={found} />}
       {save.isPending && <SkillImportProgress importing repository={source?.fullName ?? discovery!.fullName} count={selectedCount}
         found={candidates.filter(candidate => selected.has(candidate.path) && !candidate.error).map(candidate => ({ ...candidate, fileCount: candidate.inspection?.files.length ?? 1 }))} />}
     </div>
       <footer className="flex shrink-0 items-center justify-between gap-3 border-t border-border pt-4">
         <Button variant="ghost" disabled={save.isPending} onClick={() => { if (scan.isPending) stopScan(); else if (discovery && !source) clearScan(); else dismiss(); }}>{scan.isPending ? 'Cancel scan' : discovery && !source ? 'Back' : 'Cancel'}</Button>
-        {ready ? <Button disabled={busy || (!source && packageMode === 'skills' && selectedCount === 0)} onClick={() => save.mutate()}>{save.isPending ? 'Saving…' : source ? 'Save selection' : packageMode === 'repository' ? 'Import repository' : `Import ${selectedCount} ${selectedCount === 1 ? "skill" : "skills"}`}</Button>
+        {ready ? <Button disabled={busy || (!source && packageMode === 'skills' && selectedCount === 0)} onClick={() => save.mutate(false)}>{save.isPending ? 'Saving…' : source ? 'Save selection' : packageMode === 'repository' ? 'Import repository' : `Import ${selectedCount} ${selectedCount === 1 ? "skill" : "skills"}`}</Button>
           : <Button disabled={busy || repositories.isPending || !repositoryUrl.trim()} onClick={() => scan.mutate(packageMode)}>{scan.isPending ? 'Scanning…' : 'Find skills'}</Button>}
       </footer>
     {preview && <SkillPackagePreview key={`${packageMode}:${preview.repository}:${preview.skill.path}:${preview.filePath ?? ''}`} companyId={companyId}
       repositoryPackage={preview.repository ? repositoryPackage ?? undefined : undefined}
       repository={{ packageMode, repositoryUrl: source?.repositoryUrl ?? discovery!.repositoryUrl, connectionId: source ? sourceConnectionId : connectionId }}
       commitSha={preview.skill.inspection?.commitSha ?? source?.lastScanCommit ?? discovery?.commitSha ?? null} skill={preview.skill} initialFile={preview.filePath} onClose={() => setPreview(null)} />}
+    <SkillInspectionDialog {...saveInspectionHold.dialogProps(save.isPending)} />
   </DialogContent></Dialog>;
 }

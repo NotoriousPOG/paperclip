@@ -151,11 +151,13 @@ export type SkillSourceDiscoveryEvent = SkillSourceScanUpdate
   | { type: 'error'; error: string; status: number };
 
 export interface SkillSourceCreateRequest extends SkillSourceDiscoveryRequest {
+  acceptInspection?: boolean;
   commitSha: string;
   selectedPaths: string[];
   excludedFolders?: string[];
 }
 export interface SkillSourceSelectionRequest {
+  acceptInspection?: boolean;
   packageMode?: SkillSourcePackageMode;
   revision: number;
   selectedPaths: string[];

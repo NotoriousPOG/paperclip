@@ -1,7 +1,7 @@
 import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { auditSkillSnapshot, classifyInventoryKind, inspectSkillDirectory } from "../services/company-skills.js";
 import {
   inspectionBlocks,
@@ -10,6 +10,9 @@ import {
   scanSkillDirectory,
   scanSkillFiles,
 } from "../services/skill-inspector.js";
+
+beforeEach(() => vi.stubEnv("SKILLSPECTOR_ENABLED", "true"));
+afterEach(() => vi.unstubAllEnvs());
 
 // Seeded fuzzing without a fuzzing dependency. A failure message includes the seed and case
 // index, so `FUZZ_SEED=<seed>` reproduces it. `FUZZ_RUNS` scales the case count.

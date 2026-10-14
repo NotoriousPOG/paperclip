@@ -1361,7 +1361,7 @@ describe("company skill mutation permissions", () => {
       .send({ source: "https://github.com/acme/public-skills" });
     expect(response.status, JSON.stringify(response.body)).toBe(201);
     expect(mockSkillSourceService.importFromUrl).toHaveBeenCalledWith("company-1", expect.anything(),
-      expect.objectContaining({ setup: { userId: null, agentId: agent.agentId, localTrusted: false } }));
+      expect.objectContaining({ setup: { userId: null, agentId: agent.agentId, localTrusted: false } }), { acceptInspection: false });
   });
 
   it("derives refresh authority from the authenticated run instead of caller responsibility", async () => {
@@ -1372,7 +1372,7 @@ describe("company skill mutation permissions", () => {
     expect(response.status, JSON.stringify(response.body)).toBe(201);
     expect(mockCaptureRunIdentity).toHaveBeenCalledWith(expect.anything(), { companyId: "company-1", agentId: agent.agentId, runId: "run-1" });
     expect(mockSkillSourceService.importFromUrl).toHaveBeenCalledWith("company-1", expect.anything(),
-      expect.objectContaining({ setup: { userId: "validated-owner", agentId: agent.agentId, localTrusted: false } }));
+      expect.objectContaining({ setup: { userId: "validated-owner", agentId: agent.agentId, localTrusted: false } }), { acceptInspection: false });
   });
 
   it("rejects a run-authenticated import without a run identity", async () => {

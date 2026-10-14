@@ -710,6 +710,14 @@ unavailable. Preserve current ownership and newer-work fences. See
 
 ### Git-backed skill library sources
 
+An operator may enable optional SkillSpector inspection before publishing
+imported or refreshed skill content. It includes shared repository files and
+retains installed content when a scan holds a change. A board user may accept a
+scanner hold for the current operation; agents and automatic refresh cannot.
+Hard platform safety checks and company policies remain authoritative. Content
+inspection does not replace resource permissions or runtime confinement. See
+the implementation contract and `doc/CLI.md`.
+
 Repositories can supply read-only company skills independently of project repositories.
 A source tracks repository identity, branch, selected paths, and installed commits;
 an existing GitHub connection supplies caller-authorized reads. Manual refresh publishes

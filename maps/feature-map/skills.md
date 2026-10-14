@@ -68,6 +68,15 @@ Manual: Enable the skill for one test agent and leave another without access. Ru
 
 ### Project repository source behavior
 
+With optional SkillSpector inspection enabled, source imports and refreshes hold
+new content before publication when the scanner reports risk or cannot finish.
+The Sources UI shows findings and offers an explicit board override. Declining
+keeps the installed content; automatic refresh cannot accept a hold. Workspace
+refreshes also inspect before updating stored content. The
+[publication tests](../../server/src/__tests__/skill-inspection-publication.test.ts)
+use a stub scanner and local provider fixtures; they are not live scanner or
+agent-execution qualification. Hard platform safety failures are not overridable.
+
 New GitHub project repositories import skills automatically. Skills → Sources lists
 accessible legacy repositories with Import skills, shows source/project provenance,
 groups matching repository/ref workspaces into one row, and shows queued/importing feedback,

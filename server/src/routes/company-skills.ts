@@ -1,6 +1,4 @@
-import { logger } from "../middleware/logger.js";
-import type { CompanySkill, CompanySkillInspection } from "@paperclipai/shared";
-import { failedInspection } from "../services/skill-inspector.js";
+import type { CompanySkillInspection } from "@paperclipai/shared";
 import { projectSkillSetupIdentity } from "../services/project-skill-source-bindings.js";
 import { adoptProjectSkillRepository, projectSkillRepositories, skillSourceSyncService } from "../services/skill-source-sync.js";
 import { skillAccessRequestContext, skillAccessService } from "../services/skill-access.js";
@@ -119,18 +117,6 @@ export function companySkillRoutes(db: Db) {
   const access = accessService(db);
   const svc = companySkillService(db);
   const sourceSvc = skillSourceService(db);
-
-  /** Post-install inspection for skills that were refreshed in place rather than gated before install. */
-  async function inspectionsFor(companyId: string, skills: CompanySkill[]): Promise<CompanySkillInspection[]> {
-    if (skills.length === 0) return [];
-    try {
-      return await svc.inspectAddedSkills(companyId, skills);
-    } catch (error) {
-      logger.warn({ err: error, companyId }, "skill inspection failed");
-      return skills.map((skill) =>
-        failedInspection(skill.id, skill.name, "SkillSpector could not finish the scan. The skill was still added."));
-    }
-  }
 
   /** Accepting blocking SkillSpector findings is a governed override, so only board users may do it. */
   function readAcceptInspection(req: Request): boolean {
@@ -380,6 +366,7 @@ export function companySkillRoutes(db: Db) {
     const setup = await projectSkillSetupIdentity(db, companyId, req.actor);
     const result = await operation({
       actor: skillActor(req),
+      acceptInspection: readAcceptInspection(req),
       setup: { userId: setup.refreshUserId, agentId: setup.refreshAgentId, localTrusted: setup.refreshLocalTrusted },
       read: connectionId => skillSourceGitHubReader(db, companyId, req.actor, connectionId),
       authorize: (action, resource) => assertCanMutateCompanySkills(req, companyId, action, resource),
@@ -387,6 +374,7 @@ export function companySkillRoutes(db: Db) {
         const { publication } = await persistActivity(tx as unknown as Db, { ...actor, companyId, action, entityType: "company_skill_source", entityId: sourceId, details });
         publications.push(publication);
       },
+      publishCommittedActivity: () => publications.splice(0).forEach(publishActivity),
     });
     publications.forEach(publishActivity);
     return result;
@@ -1597,7 +1585,7 @@ export function companySkillRoutes(db: Db) {
       res.json({
         ...result,
         held: result.held === true,
-        inspections: [...(result.inspections ?? []), ...await inspectionsFor(companyId, result.updated)],
+        inspections: result.inspections ?? [],
       });
     },
   );

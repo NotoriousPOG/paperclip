@@ -43,6 +43,6 @@ export const skillSourcesApi = {
   preview: (companyId: string, input: SkillSourcePreviewRequest) => api.post<SkillSourceFilePreview>(`${base(companyId)}/preview`, input),
   create: (companyId: string, input: SkillSourceCreateRequest) => api.post<SkillSourceRefreshResult>(base(companyId), input),
   select: (companyId: string, id: string, input: SkillSourceSelectionRequest) => api.patch<SkillSourceRefreshResult>(`${base(companyId)}/${id}`, input),
-  refresh: (companyId: string, id: string) => api.post<SkillSourceRefreshResult>(`${base(companyId)}/${id}/refresh`, {}),
+  refresh: (companyId: string, id: string, acceptInspection = false) => api.post<SkillSourceRefreshResult>(`${base(companyId)}/${id}/refresh`, acceptInspection ? { acceptInspection: true } : {}),
   disconnect: (companyId: string, id: string, input: SkillSourceDisconnectRequest) => api.delete<SkillSourceDisconnectResult>(`${base(companyId)}/${id}`, input),
 };

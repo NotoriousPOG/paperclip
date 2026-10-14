@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { CompanySkillInspection } from "@paperclipai/shared";
-import { notableInspections } from "../../api/skillInspection";
+import { inspectionHoldFromError, notableInspections } from "../../api/skillInspection";
 
 type Inspected = { held?: boolean; inspections?: CompanySkillInspection[] };
 
@@ -39,6 +39,10 @@ export function useSkillInspectionHold() {
 
   return {
     review,
+    reviewError: (error: unknown, retryWithAccept: () => void) => {
+      const held = inspectionHoldFromError(error);
+      return held ? review(held, retryWithAccept, false) : false;
+    },
     dialogProps: (installPending: boolean) => ({
       open: inspections.length > 0,
       inspections,

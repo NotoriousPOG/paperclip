@@ -14,11 +14,13 @@ export const skillSourcePreviewSchema = skillSourceDiscoverySchema.extend({
   filePath: repoPath.refine(value => value.length > 0, 'A file path is required'),
 });
 export const skillSourceCreateSchema = skillSourceDiscoverySchema.extend({
+  acceptInspection: z.boolean().optional(),
   commitSha: z.string().regex(/^[a-f0-9]{40}$/i),
   selectedPaths: z.array(repoPath).max(10000),
   excludedFolders: z.array(repoPath).max(10000).default([]),
 });
 export const skillSourceSelectionSchema = z.object({
+  acceptInspection: z.boolean().optional(),
   packageMode: z.enum(['skills', 'repository']).optional(),
   revision: z.number().int().nonnegative(),
   selectedPaths: z.array(repoPath).max(10000),
